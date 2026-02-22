@@ -1,0 +1,386 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+/* ========================================
+   THE BITCOIN GAME — Design System
+   Tailwind CSS v4 Theme Configuration
+   ======================================== */
+
+@theme {
+  /* ── Background Layers (Depth System) ── */
+  --color-canvas: #06080C;
+  --color-surface: #0D1117;
+  --color-elevated: #161B22;
+  --color-floating: #1C2333;
+  --color-spotlight: #252D3A;
+
+  /* ── Accent Colors ── */
+  --color-bitcoin: #F7931A;
+  --color-bitcoin-glow: oklch(from #F7931A l c h / 40%);
+  --color-cyan: #58A6FF;
+  --color-green: #3FB950;
+  --color-red: #F85149;
+  --color-purple: #A371F7;
+  --color-gold: #D4A843;
+
+  /* ── Text Colors ── */
+  --color-primary: #E6EDF3;
+  --color-secondary: #8B949E;
+  --color-subtle: #30363D;
+
+  /* ── Fonts ── */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-display: "Clash Display", "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  /* ── Typography Scale ── */
+  --text-hero: 3.5rem;
+  --text-hero--line-height: 4rem;
+  --text-hero--letter-spacing: -0.02em;
+
+  --text-display-lg: 2.5rem;
+  --text-display-lg--line-height: 3rem;
+  --text-display-lg--letter-spacing: -0.02em;
+
+  --text-display-md: 2rem;
+  --text-display-md--line-height: 2.5rem;
+  --text-display-md--letter-spacing: -0.01em;
+
+  --text-title: 1.5rem;
+  --text-title--line-height: 2rem;
+  --text-title--letter-spacing: -0.01em;
+
+  --text-headline: 1.25rem;
+  --text-headline--line-height: 1.75rem;
+
+  --text-body-lg: 1.0625rem;
+  --text-body-lg--line-height: 1.625rem;
+
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.5rem;
+
+  --text-caption: 0.8125rem;
+  --text-caption--line-height: 1.125rem;
+
+  --text-micro: 0.6875rem;
+  --text-micro--line-height: 1rem;
+  --text-micro--letter-spacing: 0.02em;
+
+  /* ── Spacing (4px base) ── */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.75rem;
+  --space-lg: 1rem;
+  --space-xl: 1.5rem;
+  --space-2xl: 2rem;
+  --space-3xl: 3rem;
+  --space-4xl: 4rem;
+
+  /* ── Border Radius ── */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-full: 9999px;
+
+  /* ── Shadows ── */
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-medium: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-heavy: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-glow-orange: 0 0 20px rgba(247, 147, 26, 0.3);
+  --shadow-glow-cyan: 0 0 20px rgba(88, 166, 255, 0.2);
+
+  /* ── Breakpoints ── */
+  --breakpoint-sm: 320px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1441px;
+  --container-3xs: 16rem;
+  --container-2xs: 18rem;
+  --container-xs: 20rem;
+  --container-sm: 24rem;
+  --container-md: 28rem;
+  --container-lg: 32rem;
+  --container-xl: 36rem;
+  --container-2xl: 42rem;
+  --container-3xl: 48rem;
+  --container-4xl: 56rem;
+  --container-5xl: 64rem;
+  --container-6xl: 72rem;
+  --container-7xl: 80rem;
+
+  /* ── Layout ── */
+  --sidebar-width: 260px;
+  --sidebar-collapsed: 72px;
+  --content-max: 1280px;
+  --topbar-height: 64px;
+  --tabbar-height: 56px;
+
+  /* ── Animation Easings ── */
+  --ease-smooth: cubic-bezier(0.25, 0.1, 0.25, 1.0);
+  --ease-snappy: cubic-bezier(0.2, 0, 0, 1.0);
+  --ease-dramatic: cubic-bezier(0.7, 0, 0.3, 1.0);
+  --ease-gentle: cubic-bezier(0.4, 0, 0.2, 1.0);
+}
+
+/* ── Base Styles ── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  color: var(--color-primary);
+  background-color: var(--color-canvas);
+  min-height: 100vh;
+}
+
+/* ── Glassmorphism ── */
+.glass {
+  background: rgba(13, 17, 23, 0.7);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Scrollbar Styling ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-subtle);
+  border-radius: var(--radius-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-secondary);
+}
+
+/* ── Selection ── */
+::selection {
+  background: rgba(247, 147, 26, 0.3);
+  color: var(--color-primary);
+}
+
+/* ── Focus Ring ── */
+:focus-visible {
+  outline: 2px solid var(--color-cyan);
+  outline-offset: 2px;
+}
+
+/* ── Tabular Nums for Monospace ── */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Shimmer Animation (for Skeleton) ── */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-elevated) 25%,
+    var(--color-floating) 50%,
+    var(--color-elevated) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* ── Legendary Badge Shimmer ── */
+@keyframes legendary-shimmer {
+  0%,
+  100% {
+    box-shadow: 0 0 12px rgba(212, 168, 67, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(212, 168, 67, 0.6);
+  }
+}
+
+.animate-legendary {
+  animation: legendary-shimmer 2s ease-in-out infinite;
+}
+
+/* ── Fire Flicker Animation ── */
+@keyframes fire-flicker {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    filter: brightness(1);
+  }
+  25% {
+    transform: scale(1.05) rotate(-2deg);
+    filter: brightness(1.2);
+  }
+  50% {
+    transform: scale(0.97) rotate(1deg);
+    filter: brightness(0.9);
+  }
+  75% {
+    transform: scale(1.03) rotate(-1deg);
+    filter: brightness(1.1);
+  }
+}
+
+.animate-fire-flicker {
+  animation: fire-flicker 0.8s ease-in-out infinite;
+}
+
+/* ── Fire Glow Animation ── */
+@keyframes fire-glow {
+  0%,
+  100% {
+    text-shadow: 0 0 8px rgba(247, 147, 26, 0.4);
+  }
+  50% {
+    text-shadow: 0 0 20px rgba(247, 147, 26, 0.8), 0 0 40px rgba(247, 147, 26, 0.3);
+  }
+}
+
+.animate-fire-glow {
+  animation: fire-glow 1.5s ease-in-out infinite;
+}
+
+/* ── XP Particle Flow ── */
+@keyframes xp-particle-flow {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(var(--flow-distance, 100px));
+    opacity: 0;
+  }
+}
+
+.animate-xp-particle {
+  animation: xp-particle-flow 2s linear infinite;
+}
+
+/* ── Radar Pulse Animation ── */
+@keyframes radar-pulse {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+.animate-radar-pulse {
+  animation: radar-pulse 2s ease-out infinite;
+}
+
+.animate-radar-pulse-delayed {
+  animation: radar-pulse 2s ease-out 0.6s infinite;
+}
+
+.animate-radar-pulse-delayed-2 {
+  animation: radar-pulse 2s ease-out 1.2s infinite;
+}
+
+/* ── Pulsing Border ── */
+@keyframes pulse-border {
+  0%,
+  100% {
+    border-color: rgba(247, 147, 26, 0.3);
+  }
+  50% {
+    border-color: rgba(247, 147, 26, 0.8);
+  }
+}
+
+.animate-pulse-border {
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+/* ── Confetti Fall ── */
+@keyframes confetti-fall {
+  0% {
+    transform: translateY(-10px) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+.animate-confetti {
+  animation: confetti-fall 3s ease-in forwards;
+}
+
+/* ── Spin Once ── */
+@keyframes spin-once {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-once {
+  animation: spin-once 0.6s ease-in-out;
+}
+
+/* ── Reduced Motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .animate-shimmer,
+  .animate-legendary,
+  .animate-fire-flicker,
+  .animate-fire-glow,
+  .animate-xp-particle,
+  .animate-radar-pulse,
+  .animate-radar-pulse-delayed,
+  .animate-radar-pulse-delayed-2,
+  .animate-pulse-border,
+  .animate-confetti,
+  .animate-spin-once {
+    animation: none;
+  }
+}
