@@ -1,0 +1,39 @@
+# =============================================================================
+# TheBitcoinGame — Grafana Dashboard Provisioning
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# This file tells Grafana where to find dashboard JSON files on disk.
+# Dashboards are loaded on startup and kept in sync with the filesystem.
+#
+# All dashboards are mounted from the host at:
+#   services/monitoring/grafana/dashboards/ -> /var/lib/grafana/dashboards/
+#
+# Dashboard files:
+#   - ckpool.json           — Original basic CKPool dashboard (Phase 4)
+#   - ckpool-overview.json  — Comprehensive CKPool overview (Phase 5)
+#   - ckpool-regional.json  — Multi-region CKPool monitoring (Phase 5)
+#   - bitcoin-core.json     — Bitcoin Core node health (Phase 5)
+#   - event-pipeline.json   — TBG event pipeline monitoring (Phase 5)
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: "thebitcoingame"
+    orgId: 1
+    folder: "The Bitcoin Game"
+    type: file
+    disableDeletion: false
+    # Allow editing in the UI for ad-hoc exploration, but changes
+    # are not persisted — the JSON files are the source of truth.
+    editable: true
+    # How often Grafana checks for dashboard changes on disk (seconds).
+    updateIntervalSeconds: 30
+    # Allow Grafana to update the dashboard if the JSON file changes.
+    allowUiUpdates: false
+    options:
+      # Path inside the container where dashboard JSONs are mounted
+      path: /var/lib/grafana/dashboards
+      # Do not create subfolders based on directory structure
+      foldersFromFilesStructure: false

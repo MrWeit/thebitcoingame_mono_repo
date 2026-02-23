@@ -1,0 +1,320 @@
+# =============================================================================
+# TheBitcoinGame — Monitoring & Alerting Stack (Docker Compose Overlay)
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# Usage:
+#   # Development (with base services):
+#   docker compose -f docker-compose.yml -f monitoring/docker-compose.monitoring.yml up -d
+#
+#   # Production (with production base):
+#   docker compose -f docker-compose.production.yml -f monitoring/docker-compose.monitoring.yml up -d
+#
+# This overlay adds:
+#   - Prometheus (metrics collection + alerting rules)
+#   - Alertmanager (alert routing + notification)
+#   - Grafana (dashboards + visualization)
+#   - Node Exporter (host-level metrics)
+#   - Redis Exporter (Redis health metrics)
+#   - Postgres Exporter (TimescaleDB health metrics)
+#
+# All monitoring services run on a dedicated 'monitoring' network and also
+# join 'ckpool-net' to reach application services for scraping.
+#
+# Required environment variables (for alerting):
+#   SMTP_FROM, SMTP_SMARTHOST, SMTP_AUTH_USERNAME, SMTP_AUTH_PASSWORD
+#   ALERT_EMAIL, PAGERDUTY_KEY, SLACK_WEBHOOK
+#   GRAFANA_ADMIN_PASSWORD
+#   POSTGRES_USER, POSTGRES_PASSWORD, REDIS_PASSWORD (if auth enabled)
+# =============================================================================
+
+version: "3.8"
+
+# =============================================================================
+# Shared Configuration Anchors
+# =============================================================================
+x-logging: &monitoring-logging
+  driver: json-file
+  options:
+    max-size: "25m"
+    max-file: "3"
+
+x-restart: &monitoring-restart
+  restart: unless-stopped
+
+services:
+  # ===========================================================================
+  # Prometheus — Metrics Collection & Alert Evaluation
+  # ===========================================================================
+  # Prometheus scrapes all application and infrastructure exporters, evaluates
+  # alert rules, and pushes firing alerts to Alertmanager.
+  #
+  # Configuration is hot-reloadable via POST /-/reload (--web.enable-lifecycle)
+  # without restarting the container.
+  #
+  # Data retention: 30 days or 10GB, whichever comes first.
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: tbg-prometheus
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "9090:9090"
+    volumes:
+      # Main Prometheus configuration
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alert rule files (all .yml files in the alerts directory)
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
+      # Persistent time-series data storage
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      # Retain metrics for 30 days
+      - "--storage.tsdb.retention.time=30d"
+      # Cap storage at 10GB to prevent disk exhaustion
+      - "--storage.tsdb.retention.size=10GB"
+      # Enable hot-reload of configuration via HTTP POST to /-/reload
+      - "--web.enable-lifecycle"
+      # Enable admin API for snapshots and series deletion
+      - "--web.enable-admin-api"
+      # Log level — info is appropriate for production
+      - "--log.level=info"
+    networks:
+      - monitoring
+      - ckpool-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ===========================================================================
+  # Alertmanager — Alert Routing & Notification
+  # ===========================================================================
+  # Receives alerts from Prometheus, deduplicates and groups them, then
+  # routes to the appropriate notification channel (email, PagerDuty, Slack).
+  #
+  # Inhibition rules suppress warning alerts when critical alerts are firing
+  # for the same issue, reducing notification noise during outages.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: tbg-alertmanager
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      # Store notification state (silences, NFLOG) in this directory
+      - "--storage.path=/alertmanager"
+      # Cluster listen address (for HA deployments with multiple instances)
+      - "--cluster.listen-address="
+      # Log level
+      - "--log.level=info"
+    environment:
+      # Alert notification credentials — injected from .env file
+      SMTP_FROM: "${SMTP_FROM:-alerts@thebitcoingame.com}"
+      SMTP_SMARTHOST: "${SMTP_SMARTHOST:-smtp.gmail.com:587}"
+      SMTP_AUTH_USERNAME: "${SMTP_AUTH_USERNAME:-}"
+      SMTP_AUTH_PASSWORD: "${SMTP_AUTH_PASSWORD:-}"
+      ALERT_EMAIL: "${ALERT_EMAIL:-ops@thebitcoingame.com}"
+      PAGERDUTY_KEY: "${PAGERDUTY_KEY:-}"
+      SLACK_WEBHOOK: "${SLACK_WEBHOOK:-}"
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===========================================================================
+  # Grafana — Dashboards & Visualization
+  # ===========================================================================
+  # Pre-provisioned with Prometheus datasource and 5 dashboards:
+  #   1. CKPool Mining Dashboard (original Phase 4)
+  #   2. CKPool Overview (Phase 5 — key metrics, share rates, event pipeline)
+  #   3. CKPool Regional (Phase 5 — multi-region miner/share/latency)
+  #   4. Bitcoin Core (Phase 5 — block height, mempool, resources)
+  #   5. Event Pipeline (Phase 5 — ring buffer, throughput, batching)
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: tbg-grafana
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "3030:3000"
+    volumes:
+      # Persistent Grafana data (users, orgs, annotations, etc.)
+      - grafana-data:/var/lib/grafana
+      # Provisioning: datasources and dashboard provider config
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboard JSON files
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      # Admin credentials
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-tbgdev2026}"
+      # Disable public sign-up
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Disable analytics/telemetry
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Default home dashboard
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/var/lib/grafana/dashboards/ckpool-overview.json"
+      # Alerting: connect Grafana alerting to our Alertmanager
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      # Embedding and iframe support (for potential TBG frontend integration)
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    networks:
+      - monitoring
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ===========================================================================
+  # Node Exporter — Host-Level Metrics
+  # ===========================================================================
+  # Exposes hardware and OS metrics: CPU, memory, disk, network, filesystem.
+  # Essential for correlating mining pool issues with host resource constraints.
+  #
+  # Runs with host PID and network namespace for accurate metrics.
+  # The /proc, /sys, and / mounts are read-only for security.
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: tbg-node-exporter
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "9101:9100"
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.rootfs=/rootfs"
+      - "--path.sysfs=/host/sys"
+      # Collectors to enable
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+      # Disable collectors that are noisy or not useful in containers
+      - "--no-collector.ipvs"
+      - "--no-collector.btrfs"
+      - "--no-collector.infiniband"
+      - "--no-collector.xfs"
+      - "--no-collector.zfs"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - monitoring
+    # Node exporter needs host PID namespace for process metrics
+    pid: host
+
+  # ===========================================================================
+  # Redis Exporter — Redis Health Metrics
+  # ===========================================================================
+  # Monitors the Redis instance used for the TBG event stream pipeline:
+  #   - Memory usage and eviction rates
+  #   - Stream lengths (event backlog)
+  #   - Connected clients
+  #   - Command latency per operation
+  #   - Keyspace statistics
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.56.0
+    container_name: tbg-redis-exporter
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "9121:9121"
+    environment:
+      # Redis connection string — uses Docker service name
+      # If Redis has auth enabled, include the password:
+      #   redis://:${REDIS_PASSWORD}@redis:6379
+      REDIS_ADDR: "redis://redis:6379"
+      # Include per-command latency metrics
+      REDIS_EXPORTER_INCL_SYSTEM_METRICS: "true"
+      # Export stream metrics (important for event pipeline monitoring)
+      REDIS_EXPORTER_CHECK_STREAMS: "true"
+    networks:
+      - monitoring
+      - ckpool-net
+    depends_on:
+      - redis
+
+  # ===========================================================================
+  # PostgreSQL / TimescaleDB Exporter — Database Health Metrics
+  # ===========================================================================
+  # Monitors the TimescaleDB instance used for event storage:
+  #   - Active connections and pool utilization
+  #   - Transaction commit/rollback rates
+  #   - Table and index bloat
+  #   - Vacuum and autovacuum statistics
+  #   - Replication lag (if replicas added later)
+  #   - Lock contention and deadlocks
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: tbg-postgres-exporter
+    <<: *monitoring-restart
+    logging: *monitoring-logging
+    ports:
+      - "9187:9187"
+    environment:
+      # Connection string to TimescaleDB
+      # Uses Docker service name 'timescaledb' as the host
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-tbg}:${POSTGRES_PASSWORD:-tbgdev2026}@timescaledb:5432/thebitcoingame?sslmode=disable"
+      # Disable default metrics that require superuser
+      PG_EXPORTER_DISABLE_DEFAULT_METRICS: "false"
+      PG_EXPORTER_DISABLE_SETTINGS_METRICS: "false"
+    networks:
+      - monitoring
+      - ckpool-net
+    depends_on:
+      - timescaledb
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  # Dedicated monitoring network — all monitoring services communicate here
+  monitoring:
+    driver: bridge
+
+  # Shared network with application services — allows exporters and Prometheus
+  # to reach CKPool (9100), Redis (6379), TimescaleDB (5432), etc.
+  # This network must also be defined in the base docker-compose.yml.
+  # If using docker-compose.production.yml, this maps to 'tbg-internal'.
+  ckpool-net:
+    external: true
+    name: ${CKPOOL_NETWORK_NAME:-services_default}
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  # Prometheus time-series database storage
+  prometheus-data:
+    driver: local
+  # Alertmanager notification state (silences, NFLOG)
+  alertmanager-data:
+    driver: local
+  # Grafana persistent data (users, orgs, annotations)
+  grafana-data:
+    driver: local

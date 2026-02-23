@@ -1,0 +1,493 @@
+# TheBitcoinGame — Multi-Region Mining Simulation (Phase 4)
+# Simulates 3 geographic regions: EU (primary), US-East (relay), Asia (relay)
+# with artificial latency via tc netem on relay containers.
+#
+# Usage:
+#   docker compose -f docker-compose.multi-region.yml build
+#   docker compose -f docker-compose.multi-region.yml up -d
+#
+# Ports:
+#   EU:   Stratum 3333, Metrics 9100, Bitcoin RPC 38332
+#   US:   Stratum 3334, Metrics 9101, Bitcoin RPC 38333
+#   Asia: Stratum 3335, Metrics 9102, Bitcoin RPC 38334
+#   Infra: Redis 6379, TimescaleDB 5432, Prometheus 9090, Grafana 3030
+#   NATS:  Client 4222, Monitoring 8222
+#   Health Monitor: 8090
+
+services:
+  # ============================================================
+  # BITCOIN CORE NODES (one per region)
+  # ============================================================
+
+  bitcoin-signet-eu:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-bitcoin-signet-eu
+    command:
+      - -signet
+      - -server=1
+      - -rpcuser=tbg
+      - -rpcpassword=tbgdev2026
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -rpcport=38332
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+      - -txindex=1
+      - -fallbackfee=0.00001
+      - -dbcache=256
+    ports:
+      - "38332:38332"
+      - "28332:28332"
+    volumes:
+      - bitcoin-signet-eu-data:/home/bitcoin/.bitcoin
+    networks:
+      - eu_net
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-signet", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=38332", "getblockchaininfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  bitcoin-signet-us:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-bitcoin-signet-us
+    command:
+      - -signet
+      - -server=1
+      - -rpcuser=tbg
+      - -rpcpassword=tbgdev2026
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -rpcport=38332
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+      - -fallbackfee=0.00001
+      - -dbcache=128
+      - -prune=1000
+    ports:
+      - "38333:38332"
+    volumes:
+      - bitcoin-signet-us-data:/home/bitcoin/.bitcoin
+    networks:
+      - us_net
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-signet", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=38332", "getblockchaininfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  bitcoin-signet-asia:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-bitcoin-signet-asia
+    command:
+      - -signet
+      - -server=1
+      - -rpcuser=tbg
+      - -rpcpassword=tbgdev2026
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -rpcport=38332
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+      - -fallbackfee=0.00001
+      - -dbcache=128
+      - -prune=1000
+    ports:
+      - "38334:38332"
+    volumes:
+      - bitcoin-signet-asia-data:/home/bitcoin/.bitcoin
+    networks:
+      - asia_net
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-signet", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=38332", "getblockchaininfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  # ============================================================
+  # CKPOOL INSTANCES (EU = primary, US/Asia = relay)
+  # ============================================================
+
+  ckpool-eu:
+    build:
+      context: ./ckpool
+      dockerfile: Dockerfile
+    container_name: tbg-ckpool-eu
+    depends_on:
+      bitcoin-signet-eu:
+        condition: service_healthy
+    ports:
+      - "3333:3333"
+      - "9100:9100"
+      - "8881:8881"
+    volumes:
+      - ckpool-eu-logs:/var/log/ckpool
+      - ckpool-eu-run:/var/run/ckpool
+      - ckpool-eu-events:/tmp/ckpool
+      - ./ckpool/config:/etc/ckpool:ro
+    networks:
+      - eu_net
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet-eu.conf -s /var/run/ckpool -l 7"]
+    restart: unless-stopped
+
+  ckpool-us:
+    build:
+      context: ./ckpool
+      dockerfile: Dockerfile
+    container_name: tbg-ckpool-us
+    depends_on:
+      bitcoin-signet-us:
+        condition: service_healthy
+      ckpool-eu:
+        condition: service_started
+    ports:
+      - "3334:3333"
+      - "9101:9100"
+    volumes:
+      - ckpool-us-logs:/var/log/ckpool
+      - ckpool-us-run:/var/run/ckpool
+      - ckpool-us-events:/tmp/ckpool
+      - ./ckpool/config:/etc/ckpool:ro
+    networks:
+      - us_net
+      - eu_net
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      apt-get update -qq && apt-get install -y -qq iproute2 > /dev/null 2>&1;
+      IFACE=$$(ip route show | grep 172.20.1 | awk '{print $$3}' || true);
+      if [ -n "$$IFACE" ]; then
+        tc qdisc add dev $$IFACE root netem delay 80ms 10ms distribution normal 2>/dev/null || true;
+        echo "Latency applied: 80ms ±10ms on $$IFACE (EU link)";
+      fi;
+      rm -f /var/run/ckpool/main.pid &&
+      exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet-us.conf -s /var/run/ckpool -l 7
+    restart: unless-stopped
+
+  ckpool-asia:
+    build:
+      context: ./ckpool
+      dockerfile: Dockerfile
+    container_name: tbg-ckpool-asia
+    depends_on:
+      bitcoin-signet-asia:
+        condition: service_healthy
+      ckpool-eu:
+        condition: service_started
+    ports:
+      - "3335:3333"
+      - "9102:9100"
+    volumes:
+      - ckpool-asia-logs:/var/log/ckpool
+      - ckpool-asia-run:/var/run/ckpool
+      - ckpool-asia-events:/tmp/ckpool
+      - ./ckpool/config:/etc/ckpool:ro
+    networks:
+      - asia_net
+      - eu_net
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      apt-get update -qq && apt-get install -y -qq iproute2 > /dev/null 2>&1;
+      IFACE=$$(ip route show | grep 172.20.1 | awk '{print $$3}' || true);
+      if [ -n "$$IFACE" ]; then
+        tc qdisc add dev $$IFACE root netem delay 150ms 20ms distribution normal 2>/dev/null || true;
+        echo "Latency applied: 150ms ±20ms on $$IFACE (EU link)";
+      fi;
+      rm -f /var/run/ckpool/main.pid &&
+      exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet-asia.conf -s /var/run/ckpool -l 7
+    restart: unless-stopped
+
+  # ============================================================
+  # NATS (cross-region event replication)
+  # ============================================================
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: tbg-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    networks:
+      - eu_net
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nats-init:
+    image: natsio/nats-box:latest
+    container_name: tbg-nats-init
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - eu_net
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      nats -s nats://nats:4222 stream add MINING_EVENTS
+        --subjects "events.>"
+        --retention work
+        --max-age 24h
+        --max-bytes 1073741824
+        --storage file
+        --replicas 1
+        --discard old
+        --dupe-window 2m
+        --no-deny-delete
+        --no-deny-purge
+        --defaults 2>/dev/null || true;
+      nats -s nats://nats:4222 consumer add MINING_EVENTS event-collector
+        --deliver all
+        --ack explicit
+        --max-pending 1000
+        --filter ""
+        --replay instant
+        --defaults 2>/dev/null || true;
+      echo "NATS JetStream initialized"
+    restart: "no"
+
+  # ============================================================
+  # NATS SIDECAR PUBLISHERS (one per ckpool instance)
+  # ============================================================
+
+  nats-publisher-eu:
+    build:
+      context: ./nats-publisher
+      dockerfile: Dockerfile
+    container_name: tbg-nats-publisher-eu
+    depends_on:
+      nats:
+        condition: service_healthy
+    volumes:
+      - ckpool-eu-events:/tmp/ckpool
+    environment:
+      NATS_URL: nats://nats:4222
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      REGION: eu-west
+      LOG_LEVEL: INFO
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  nats-publisher-us:
+    build:
+      context: ./nats-publisher
+      dockerfile: Dockerfile
+    container_name: tbg-nats-publisher-us
+    depends_on:
+      nats:
+        condition: service_healthy
+    volumes:
+      - ckpool-us-events:/tmp/ckpool
+    environment:
+      NATS_URL: nats://nats:4222
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      REGION: us-east
+      LOG_LEVEL: INFO
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  nats-publisher-asia:
+    build:
+      context: ./nats-publisher
+      dockerfile: Dockerfile
+    container_name: tbg-nats-publisher-asia
+    depends_on:
+      nats:
+        condition: service_healthy
+    volumes:
+      - ckpool-asia-events:/tmp/ckpool
+    environment:
+      NATS_URL: nats://nats:4222
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      REGION: ap-south
+      LOG_LEVEL: INFO
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  # ============================================================
+  # SHARED INFRASTRUCTURE (on eu_net)
+  # ============================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: tbg-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - eu_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: tbg-timescaledb
+    environment:
+      POSTGRES_USER: tbg
+      POSTGRES_PASSWORD: tbgdev2026
+      POSTGRES_DB: thebitcoingame
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./event-collector/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    networks:
+      - eu_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tbg -d thebitcoingame"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  event-collector:
+    build:
+      context: ./event-collector
+      dockerfile: Dockerfile
+    container_name: tbg-event-collector
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ckpool-eu-events:/tmp/ckpool
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://tbg:tbgdev2026@timescaledb:5432/thebitcoingame
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: MINING_EVENTS
+      NATS_CONSUMER: event-collector
+      LOG_LEVEL: DEBUG
+      BATCH_FLUSH_INTERVAL: "1.0"
+      BATCH_MAX_SIZE: "500"
+      REDIS_STREAM_MAXLEN: "100000"
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tbg-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus-multi-region.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tbg-grafana
+    ports:
+      - "3030:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: tbgdev2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+  # ============================================================
+  # HEALTH MONITOR (aggregated health endpoint)
+  # ============================================================
+
+  health-monitor:
+    build:
+      context: ./health-monitor
+      dockerfile: Dockerfile
+    container_name: tbg-health-monitor
+    depends_on:
+      nats:
+        condition: service_healthy
+    ports:
+      - "8090:8090"
+    environment:
+      CKPOOL_ENDPOINTS: "ckpool-eu:9100,ckpool-us:9100,ckpool-asia:9100"
+      CKPOOL_REGIONS: "eu-west,us-east,ap-south"
+      NATS_MONITORING_URL: http://nats:8222
+      POLL_INTERVAL: "15"
+      BIND_PORT: "8090"
+    networks:
+      - eu_net
+    restart: unless-stopped
+
+# ============================================================
+# NETWORKS
+# ============================================================
+
+networks:
+  eu_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+  us_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.2.0/24
+  asia_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.3.0/24
+
+# ============================================================
+# VOLUMES
+# ============================================================
+
+volumes:
+  bitcoin-signet-eu-data:
+  bitcoin-signet-us-data:
+  bitcoin-signet-asia-data:
+  ckpool-eu-logs:
+  ckpool-eu-run:
+  ckpool-eu-events:
+  ckpool-us-logs:
+  ckpool-us-run:
+  ckpool-us-events:
+  ckpool-asia-logs:
+  ckpool-asia-run:
+  ckpool-asia-events:
+  nats-data:
+  redis-data:
+  timescaledb-data:
+  prometheus-data:
+  grafana-data:

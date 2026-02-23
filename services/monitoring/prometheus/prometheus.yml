@@ -1,0 +1,201 @@
+# =============================================================================
+# TheBitcoinGame — Prometheus Configuration
+# Phase 5: Production Hardening — Monitoring & Alerting Stack
+# =============================================================================
+#
+# This configuration scrapes all services in the TBG stack:
+#   - CKPool mining engine (primary metrics source)
+#   - Node Exporter (host-level metrics)
+#   - Redis Exporter (cache/stream health)
+#   - PostgreSQL/TimescaleDB Exporter (database health)
+#   - Alertmanager (self-monitoring)
+#
+# Alert rules are loaded from /etc/prometheus/alerts/*.yml
+# Hot-reload supported via --web.enable-lifecycle (POST /-/reload)
+# =============================================================================
+
+global:
+  # Default scrape interval for all targets unless overridden per-job.
+  # 15s is a good balance between granularity and resource usage.
+  scrape_interval: 15s
+
+  # How often Prometheus evaluates alerting and recording rules.
+  # Matched to scrape_interval so alerts fire on the freshest data.
+  evaluation_interval: 15s
+
+  # Labels attached to all time series and alerts produced by this server.
+  # Useful when federating multiple Prometheus instances.
+  external_labels:
+    cluster: "tbg-production"
+    environment: "production"
+
+# =============================================================================
+# Alert Rule Files
+# =============================================================================
+# All .yml files in the alerts directory are loaded.
+# Changes require reload (kill -HUP or POST /-/reload with --web.enable-lifecycle).
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+# =============================================================================
+# Alertmanager Integration
+# =============================================================================
+# Prometheus pushes firing alerts to Alertmanager for routing and notification.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "alertmanager:9093"
+      # Timeout for sending alerts to Alertmanager
+      timeout: 10s
+
+# =============================================================================
+# Scrape Configurations
+# =============================================================================
+scrape_configs:
+
+  # ---------------------------------------------------------------------------
+  # CKPool Mining Engine
+  # ---------------------------------------------------------------------------
+  # Primary data source: share rates, miner counts, block height, difficulty,
+  # AsicBoost detection, event ring buffer stats, and more.
+  # Scraped at 5s for near-real-time visibility into mining operations.
+  - job_name: "ckpool"
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    static_configs:
+      - targets:
+          - "ckpool:9100"
+        labels:
+          service: "ckpool"
+          component: "stratum"
+    # Relabel to add instance label based on Docker service name
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "go_.*"
+        action: drop
+
+  # ---------------------------------------------------------------------------
+  # CKPool Multi-Region Instances (when using multi-region compose)
+  # ---------------------------------------------------------------------------
+  # These targets are only reachable in the multi-region Docker stack.
+  # In single-region deployments, these will show as DOWN — that is expected
+  # and the CKPoolProcessDown alert has a for: 1m threshold to avoid noise.
+  - job_name: "ckpool-regions"
+    scrape_interval: 5s
+    scrape_timeout: 4s
+    static_configs:
+      - targets:
+          - "ckpool-eu:9100"
+        labels:
+          region: "eu-west"
+          role: "primary"
+      - targets:
+          - "ckpool-us:9100"
+        labels:
+          region: "us-east"
+          role: "relay"
+      - targets:
+          - "ckpool-asia:9100"
+        labels:
+          region: "ap-south"
+          role: "relay"
+
+  # ---------------------------------------------------------------------------
+  # Node Exporter — Host-Level Metrics
+  # ---------------------------------------------------------------------------
+  # CPU, memory, disk, network, filesystem metrics for the Docker host.
+  # Essential for capacity planning and correlating mining issues with
+  # resource constraints.
+  - job_name: "node-exporter"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "node-exporter:9101"
+        labels:
+          service: "node-exporter"
+          component: "infrastructure"
+
+  # ---------------------------------------------------------------------------
+  # Redis Exporter
+  # ---------------------------------------------------------------------------
+  # Monitors Redis health for the event stream pipeline:
+  #   - Memory usage and eviction rates
+  #   - Stream lengths (event backlog)
+  #   - Connected clients
+  #   - Command latency
+  - job_name: "redis"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "redis-exporter:9121"
+        labels:
+          service: "redis"
+          component: "event-pipeline"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL / TimescaleDB Exporter
+  # ---------------------------------------------------------------------------
+  # Monitors the event storage database:
+  #   - Active connections and connection pool
+  #   - Transaction rates and deadlocks
+  #   - Table bloat and vacuum stats
+  #   - Replication lag (if replicas are added)
+  - job_name: "postgres"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "postgres-exporter:9187"
+        labels:
+          service: "timescaledb"
+          component: "event-pipeline"
+
+  # ---------------------------------------------------------------------------
+  # Alertmanager Self-Monitoring
+  # ---------------------------------------------------------------------------
+  # Monitors the alerting pipeline itself:
+  #   - Alert notification success/failure rates
+  #   - Silenced alert counts
+  #   - Clustering health (if HA alertmanager)
+  - job_name: "alertmanager"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets:
+          - "alertmanager:9093"
+        labels:
+          service: "alertmanager"
+          component: "monitoring"
+
+  # ---------------------------------------------------------------------------
+  # NATS JetStream (Multi-Region Event Bus)
+  # ---------------------------------------------------------------------------
+  # Only active in multi-region deployments.
+  # Monitors cross-region event replication health.
+  - job_name: "nats"
+    scrape_interval: 10s
+    scrape_timeout: 8s
+    metrics_path: /varz
+    static_configs:
+      - targets:
+          - "nats:8222"
+        labels:
+          service: "nats"
+          component: "event-pipeline"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus Self-Monitoring
+  # ---------------------------------------------------------------------------
+  # Monitors Prometheus itself: scrape duration, rule evaluation time,
+  # TSDB stats, and WAL health.
+  - job_name: "prometheus"
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - "localhost:9090"
+        labels:
+          service: "prometheus"
+          component: "monitoring"

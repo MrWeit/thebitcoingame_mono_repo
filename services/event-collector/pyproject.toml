@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tbg-event-collector"
+version = "0.1.0"
+description = "Event collector for TheBitcoinGame mining engine"
+requires-python = ">=3.12"
+license = {text = "Proprietary"}
+dependencies = [
+    "redis[hiredis]>=5.0",
+    "asyncpg>=0.29",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "fakeredis[json]>=2.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

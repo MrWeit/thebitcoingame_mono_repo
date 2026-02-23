@@ -1,0 +1,242 @@
+# Dockerfile.fuzz - Fuzzing infrastructure for CKPool Stratum parser
+#
+# Part of THE BITCOIN GAME - CKPool fuzzing infrastructure
+# Builds fuzz targets with ASAN + libFuzzer instrumentation,
+# and optionally AFL++ for coverage-guided fuzzing.
+#
+# Copyright (c) 2024-2026 THE BITCOIN GAME
+# Licensed under the GNU General Public License v3.0
+# See LICENSE file for details.
+#
+# Build:
+#   docker build -f Dockerfile.fuzz -t ckpool-fuzz .
+#
+# Run (libFuzzer, default 1 hour):
+#   docker run --rm ckpool-fuzz
+#
+# Run (custom duration):
+#   docker run --rm -e FUZZ_DURATION=7200 ckpool-fuzz
+
+FROM ubuntu:22.04
+
+LABEL maintainer="THE BITCOIN GAME"
+LABEL description="CKPool Stratum protocol fuzzing environment"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install build dependencies and fuzzing tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    clang-14 \
+    lld-14 \
+    llvm-14 \
+    llvm-14-dev \
+    llvm-14-tools \
+    afl++ \
+    ca-certificates \
+    git \
+    pkg-config \
+    && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
+    && update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-14 100 \
+    && update-alternatives --install /usr/bin/llvm-symbolizer llvm-symbolizer /usr/bin/llvm-symbolizer-14 100 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up working directory
+WORKDIR /fuzz
+
+# Copy fuzz targets and seed corpus
+COPY fuzz_stratum_parser.c .
+COPY fuzz_share_validation.c .
+COPY fuzz_bech32.c .
+COPY corpus/ ./corpus/
+
+# Create output directories
+RUN mkdir -p /fuzz/output/stratum \
+    /fuzz/output/share \
+    /fuzz/output/bech32 \
+    /fuzz/crashes
+
+# ---------------------------------------------------------------------------
+# Build fuzz targets with libFuzzer + AddressSanitizer
+# ---------------------------------------------------------------------------
+
+# Stratum parser fuzzer
+RUN clang \
+    -g -O1 \
+    -fsanitize=fuzzer,address,undefined \
+    -fno-omit-frame-pointer \
+    -fno-optimize-sibling-calls \
+    -DFUZZING_BUILD \
+    -o fuzz_stratum_parser \
+    fuzz_stratum_parser.c
+
+# Share validation fuzzer
+RUN clang \
+    -g -O1 \
+    -fsanitize=fuzzer,address,undefined \
+    -fno-omit-frame-pointer \
+    -fno-optimize-sibling-calls \
+    -DFUZZING_BUILD \
+    -o fuzz_share_validation \
+    fuzz_share_validation.c
+
+# Bech32 address fuzzer
+RUN clang \
+    -g -O1 \
+    -fsanitize=fuzzer,address,undefined \
+    -fno-omit-frame-pointer \
+    -fno-optimize-sibling-calls \
+    -DFUZZING_BUILD \
+    -o fuzz_bech32 \
+    fuzz_bech32.c
+
+# ---------------------------------------------------------------------------
+# Build AFL++ instrumented versions (for AFL++ mode)
+# ---------------------------------------------------------------------------
+
+RUN if command -v afl-clang-fast >/dev/null 2>&1; then \
+    AFL_USE_ASAN=1 afl-clang-fast \
+        -g -O1 \
+        -fno-omit-frame-pointer \
+        -DFUZZING_BUILD -DAFL_BUILD \
+        -o fuzz_stratum_parser_afl \
+        fuzz_stratum_parser.c 2>/dev/null || true; \
+    AFL_USE_ASAN=1 afl-clang-fast \
+        -g -O1 \
+        -fno-omit-frame-pointer \
+        -DFUZZING_BUILD -DAFL_BUILD \
+        -o fuzz_share_validation_afl \
+        fuzz_share_validation.c 2>/dev/null || true; \
+    AFL_USE_ASAN=1 afl-clang-fast \
+        -g -O1 \
+        -fno-omit-frame-pointer \
+        -DFUZZING_BUILD -DAFL_BUILD \
+        -o fuzz_bech32_afl \
+        fuzz_bech32.c 2>/dev/null || true; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Generate additional seed corpus entries
+# ---------------------------------------------------------------------------
+RUN printf '{"id":1,"method":"mining.subscribe","params":["bitaxe/2.3.0"]}\n' \
+    > corpus/subscribe.json && \
+    printf '{"id":2,"method":"mining.authorize","params":["bc1q8p0cpy5q4fefkc8tptt6wr77z6luztrgjf7cls.rig01","x"]}\n' \
+    > corpus/authorize.json && \
+    printf '{"id":3,"method":"mining.submit","params":["bc1q8p0cpy5q4fefkc8tptt6wr77z6luztrgjf7cls.rig01","4a2f","00000000deadbeef","6789abcd","a8f3b2c1"]}\n' \
+    > corpus/submit.json && \
+    printf '{"id":4,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"1fffe000"}]}\n' \
+    > corpus/configure.json && \
+    printf '{"id":5,"method":"mining.suggest_difficulty","params":[32768]}\n' \
+    > corpus/suggest_diff.json && \
+    printf '{"id":null,"method":"mining.subscribe","params":[]}\n' \
+    > corpus/subscribe_null_id.json && \
+    printf '{"method":"mining.subscribe","params":["test"],"id":1}\n' \
+    > corpus/reordered_keys.json && \
+    printf '{"id":"1","method":"mining.authorize","params":["user","pass"]}\n' \
+    > corpus/string_id.json && \
+    printf 'bc1q8p0cpy5q4fefkc8tptt6wr77z6luztrgjf7cls\n' \
+    > corpus/bech32_mainnet.txt && \
+    printf 'bc1paardr2nczq0rx5rqpfwnvpzaaxyttl7d5fkq2jkle0rgqku6ek3s77e7cv\n' \
+    > corpus/bech32m_taproot.txt && \
+    printf 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx\n' \
+    > corpus/bech32_testnet.txt
+
+# Add share validation corpus
+RUN printf 'worker.rig01\n4a2f\n00000000deadbeef\n6789abcd\na8f3b2c1\n' \
+    > corpus/share_valid.txt && \
+    printf 'worker.rig01\n4a30\n0000000012345678\n65432100\ndeadbeef\n1fffe000\n' \
+    > corpus/share_with_version.txt && \
+    printf 'worker.rig01\ndead\n0000000000000000\n55000000\n00000000\n' \
+    > corpus/share_stale.txt
+
+# ---------------------------------------------------------------------------
+# Default entrypoint: run all three fuzzers sequentially
+# ---------------------------------------------------------------------------
+
+ENV FUZZ_DURATION=3600
+
+COPY <<'ENTRYPOINT_SCRIPT' /fuzz/entrypoint.sh
+#!/bin/bash
+set -e
+
+DURATION="${FUZZ_DURATION:-3600}"
+PER_TARGET=$((DURATION / 3))
+
+echo "========================================"
+echo " CKPool Fuzz Campaign"
+echo " Total duration: ${DURATION}s"
+echo " Per target: ${PER_TARGET}s"
+echo "========================================"
+echo ""
+
+run_fuzzer() {
+    local name="$1"
+    local binary="$2"
+    local output_dir="$3"
+    local duration="$4"
+
+    echo "[$(date '+%H:%M:%S')] Starting: ${name} (${duration}s)"
+    echo "---"
+
+    "${binary}" \
+        -max_total_time="${duration}" \
+        -max_len=4096 \
+        -timeout=5 \
+        -rss_limit_mb=2048 \
+        -print_final_stats=1 \
+        -artifact_prefix="${output_dir}/" \
+        "${output_dir}" \
+        /fuzz/corpus/ \
+        2>&1 || true
+
+    echo ""
+    echo "[$(date '+%H:%M:%S')] Finished: ${name}"
+
+    # Report crashes
+    local crashes=$(find "${output_dir}" -name 'crash-*' -o -name 'leak-*' -o -name 'timeout-*' 2>/dev/null | wc -l)
+    if [ "${crashes}" -gt 0 ]; then
+        echo "  *** FOUND ${crashes} crash(es)! ***"
+        cp "${output_dir}"/crash-* "${output_dir}"/leak-* "${output_dir}"/timeout-* \
+           /fuzz/crashes/ 2>/dev/null || true
+    else
+        echo "  No crashes found."
+    fi
+    echo ""
+}
+
+run_fuzzer "Stratum Parser" \
+    /fuzz/fuzz_stratum_parser \
+    /fuzz/output/stratum \
+    "${PER_TARGET}"
+
+run_fuzzer "Share Validation" \
+    /fuzz/fuzz_share_validation \
+    /fuzz/output/share \
+    "${PER_TARGET}"
+
+run_fuzzer "Bech32 Decoder" \
+    /fuzz/fuzz_bech32 \
+    /fuzz/output/bech32 \
+    "${PER_TARGET}"
+
+echo "========================================"
+echo " Fuzz Campaign Complete"
+echo "========================================"
+
+TOTAL_CRASHES=$(find /fuzz/crashes -type f 2>/dev/null | wc -l)
+if [ "${TOTAL_CRASHES}" -gt 0 ]; then
+    echo " TOTAL CRASHES: ${TOTAL_CRASHES}"
+    echo " Crash artifacts saved to /fuzz/crashes/"
+    ls -la /fuzz/crashes/
+else
+    echo " No crashes found across all targets."
+fi
+echo "========================================"
+ENTRYPOINT_SCRIPT
+
+RUN chmod +x /fuzz/entrypoint.sh
+
+ENTRYPOINT ["/fuzz/entrypoint.sh"]

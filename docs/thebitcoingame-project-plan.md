@@ -28,9 +28,11 @@
 16. [Infrastructure & DevOps](#16-infrastructure--devops)
 17. [Security Architecture](#17-security-architecture)
 18. [Stratum V2 Roadmap](#18-stratum-v2-roadmap)
-19. [Team & Roles](#19-team--roles)
-20. [Timeline Summary](#20-timeline-summary)
-21. [Risk Register](#21-risk-register)
+19. [Phase 12 — Decentralized Mining (User-Run Pools & Nodes)](#19-phase-12--decentralized-mining)
+20. [Team & Roles](#20-team--roles)
+21. [Timeline Summary](#21-timeline-summary)
+22. [Risk Register](#22-risk-register)
+23. [Detailed Documentation Index](#23-detailed-documentation-index)
 
 ---
 
@@ -42,6 +44,10 @@ The mining engine is written in C and remains open-source. The dashboard, API, g
 
 **Core thesis:** Transform the boring solo mining experience into an engaging, competitive, social game — using the inherent lottery nature of mining as the foundation.
 
+**Long-term vision:** Beyond hosting a mining pool, The Bitcoin Game will evolve into a **platform** that supports both hosted mining (miners connect to our ckpool) and **self-hosted mining** (users run their own Bitcoin nodes, pools, and miners at home and report their verified mining proofs to our platform via a lightweight proxy). This maximizes decentralization and aligns with Bitcoin's ethos of self-sovereignty. See [Phase 12 — Decentralized Mining](#19-phase-12--decentralized-mining) and `docs/ckpool-service/decentralized-mining.md` for full details.
+
+> **Detailed ckpool documentation:** The mining engine has its own comprehensive documentation at `docs/ckpool-service/`. This includes the master plan, development roadmap (7 phases), open-source documentation templates, and the decentralized mining feature design.
+
 ---
 
 ## 2. System Architecture Overview
@@ -51,27 +57,43 @@ The mining engine is written in C and remains open-source. The dashboard, API, g
 │                        THE BITCOIN GAME — SYSTEM MAP                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-                    ┌──────────────────────┐
-                    │   Bitcoin Core Node   │  (multiple, geo-distributed)
-                    │   RPC + ZMQ notif.    │
-                    └──────────┬───────────┘
-                               │
-                    ┌──────────▼───────────┐
-                    │   CKPOOL-SOLO FORK    │  ◄── OPEN SOURCE (C, GPLv3)
-                    │  ┌─────────────────┐ │
-                    │  │   Generator      │ │  Block template construction
-                    │  │   Stratifier     │ │  Share validation & diff tracking
-                    │  │   Connector      │ │  Stratum TCP connections
-                    │  └─────────────────┘ │
-                    │  Port 3333 (Stratum)  │
-                    └──────────┬───────────┘
-                               │
-              ┌────────────────▼────────────────┐
-              │       EVENT PIPELINE             │  ◄── OPEN SOURCE
-              │  (Redis Streams / NATS / ZMQ)    │
-              │  share_submitted, block_found,   │
-              │  miner_connected, diff_update    │
-              └────────────────┬────────────────┘
+      MODE A: HOSTED MINING                    MODE B: SELF-HOSTED (FUTURE)
+      (Miners → our ckpool)                    (Miners → user's own pool → proxy → us)
+
+                                                ┌──────────────────────┐
+                                                │  USER'S HOME SETUP   │
+                                                │  ┌────────────────┐ │
+                                                │  │ Bitcoin Core    │ │
+                                                │  │ ckpool-solo     │ │
+                                                │  │ TBG Proxy       │─┼──── HTTPS ────┐
+                                                │  │ Miner (Bitaxe)  │ │               │
+                                                │  └────────────────┘ │               │
+                                                └──────────────────────┘               │
+                                                                                       │
+                    ┌──────────────────────┐                                           │
+                    │   Bitcoin Core Node   │  (multiple, geo-distributed)              │
+                    │   RPC + ZMQ notif.    │                                           │
+                    └──────────┬───────────┘                                           │
+                               │                                                       │
+                    ┌──────────▼───────────┐                                           │
+                    │   CKPOOL-SOLO FORK    │  ◄── OPEN SOURCE (C, GPLv3)              │
+                    │  ┌─────────────────┐ │                                           │
+                    │  │   Generator      │ │  Block template construction              │
+                    │  │   Stratifier     │ │  Share validation & diff tracking         │
+                    │  │   Connector      │ │  Stratum TCP connections                  │
+                    │  └─────────────────┘ │                                           │
+                    │  Port 3333 (Stratum)  │                                           │
+                    └──────────┬───────────┘                                           │
+                               │                                                       │
+              ┌────────────────▼────────────────┐                                     │
+              │       EVENT PIPELINE             │  ◄── OPEN SOURCE                   │
+              │  (Redis Streams / NATS / ZMQ)    │                                     │
+              │  share_submitted, block_found,   │                                     │
+              │  miner_connected, diff_update    │                                     │
+              │                                  │                                     │
+              │  source: "hosted" | "proxy"      │◄────────────────────────────────────┘
+              │  (all events carry source field) │   Share Verification Service
+              └────────────────┬────────────────┘   validates proxy-submitted proofs
                                │
          ┌─────────────────────┼─────────────────────┐
          │                     │                     │
@@ -90,6 +112,7 @@ The mining engine is written in C and remains open-source. The dashboard, API, g
                     │   FASTAPI BACKEND    │  ◄── PROPRIETARY
                     │   REST + WebSocket   │
                     │   Auth (BTC sig)     │
+                    │   Proxy API endpoint │
                     └──────────┬───────────┘
                                │
                     ┌──────────▼───────────┐
@@ -434,14 +457,16 @@ static void emit_event(const char *event_type, json_t *data) {
 
 | Event | Hook Location | Data |
 |-------|--------------|------|
-| `share_submitted` | `add_submit()` | user, worker, diff, valid, share_diff, nonce |
-| `share_best_diff` | `add_submit()` (when diff > user's session best) | user, new_best_diff |
-| `block_found` | Inside block solve detection in `test_block_solve()` | user, worker, height, hash, reward |
-| `miner_connected` | `parse_subscribe()` | user, worker, ip, user_agent |
-| `miner_disconnected` | `__del_client()` | user, worker, session_duration, shares_submitted |
-| `diff_updated` | Vardiff adjustment code | user, worker, old_diff, new_diff |
-| `hashrate_update` | Rolling stats update loop | user, worker, 1m/5m/1h/24h rates |
+| `share_submitted` | `add_submit()` | user, worker, diff, valid, share_diff, nonce, **source** |
+| `share_best_diff` | `add_submit()` (when diff > user's session best) | user, new_best_diff, **source** |
+| `block_found` | Inside block solve detection in `test_block_solve()` | user, worker, height, hash, reward, **source** |
+| `miner_connected` | `parse_subscribe()` | user, worker, ip, user_agent, **source** |
+| `miner_disconnected` | `__del_client()` | user, worker, session_duration, shares_submitted, **source** |
+| `diff_updated` | Vardiff adjustment code | user, worker, old_diff, new_diff, **source** |
+| `hashrate_update` | Rolling stats update loop | user, worker, 1m/5m/1h/24h rates, **source** |
 | `new_block_network` | `block_update()` | height, prev_hash, difficulty |
+
+> **Future-proofing note:** All events include a `source` field from day one (`"hosted"` for our ckpool, `"proxy"` for future self-hosted miners). This ensures the event pipeline, database schema, and downstream consumers can handle both hosted and self-hosted mining without schema changes. See [Phase 12 — Decentralized Mining](#19-phase-12--decentralized-mining) and `docs/ckpool-service/decentralized-mining.md`.
 
 **5.2.2 Enhanced Logging & Difficulty Tracking**
 
@@ -1488,7 +1513,87 @@ While launching with Stratum V1 (ckpool native), we plan Stratum V2 support for 
 
 ---
 
-## 19. Team & Roles
+## 19. Phase 12 — Decentralized Mining (User-Run Pools & Nodes) (Months 9-12)
+
+> **Full documentation:** `docs/ckpool-service/decentralized-mining.md`
+
+### 19.1 Vision
+
+Beyond hosting a mining pool, The Bitcoin Game will evolve to support users running their own complete mining infrastructure at home — their own Bitcoin Core node, their own ckpool instance, and their own miners — while still participating in The Bitcoin Game platform (dashboard, badges, leaderboards, World Cup, etc.).
+
+This is the ultimate decentralization play: miners aren't just mining solo, they're running the entire stack. The Bitcoin Game becomes a **gamification layer** that sits on top of any mining setup, not a centralized pool that holds all the hashrate.
+
+### 19.2 Two Mining Modes
+
+| Feature | Mode A: Hosted Mining | Mode B: Self-Hosted Mining |
+|---|---|---|
+| **Who runs ckpool?** | We do | The user does |
+| **Who runs Bitcoin Core?** | We do | The user does |
+| **Who picks transactions?** | We do (or miners via SV2) | The user does |
+| **Share verification** | ckpool validates internally | TBG Proxy sends cryptographic proofs; our backend verifies independently |
+| **Trust level** | Full (we control everything) | Verified External (cryptographic proof) |
+| **Stratum connection** | Miner → our ckpool :3333 | Miner → user's ckpool → TBG Proxy → our API |
+| **Dashboard access** | Full | Full (verified shares appear identically) |
+| **Competitive features** | Full access | Configurable per competition (see below) |
+
+### 19.3 The TBG Proxy
+
+A lightweight open-source daemon (Go or Rust, <10MB binary) that users install alongside their ckpool:
+
+- Reads share data from the user's ckpool log files or Unix socket
+- Packages verifiable share proofs (block header + coinbase TX + merkle branch + nonces)
+- Sends proofs to our REST API over HTTPS
+- Our backend independently verifies each share using the proof data:
+  1. Verify the user's BTC address is in the coinbase output
+  2. Reconstruct merkle root from coinbase + merkle branch
+  3. Double-SHA256 the block header → verify difficulty
+  4. Verify `prev_hash` is a real recent block (anti-replay)
+  5. Verify `bits` field matches network difficulty (anti-inflation)
+  6. Check timestamp is within acceptable range
+
+### 19.4 Anti-Fraud Measures
+
+- **Replay attacks:** Reject shares with stale `prev_hash` (must reference a recent block)
+- **Difficulty inflation:** Independent SHA256 verification — hash difficulty cannot be faked
+- **Fake coinbase:** Merkle root verification ensures coinbase wasn't tampered with
+- **Rate limiting:** Shares arriving faster than physically possible for claimed hashrate are flagged
+- **Block verification:** Block-found claims are verified against the Bitcoin network
+
+### 19.5 Impact on Current Architecture
+
+To support this in the future with minimal rework, the following design decisions are made **now** during Phases 1-5:
+
+1. **`source` field in all events** — Every event includes `source: "hosted"` from day one. The proxy will emit events with `source: "proxy"`. No schema changes needed later.
+2. **Share validation as a separate module** — The share verification logic is extracted into a standalone function/service, not coupled to ckpool internals. This same logic validates proxy-submitted proofs.
+3. **BTC address as universal identity** — Already the case. Works identically for hosted and self-hosted miners.
+4. **Pluggable event pipeline** — Redis Streams can accept events from multiple sources. Adding a new input (proxy API → event collector) requires no pipeline changes.
+5. **Raw proof storage** — The `shares` table includes a `proof_data` JSONB column (nullable). Hosted shares leave it null; proxy shares store the full proof for audit.
+
+### 19.6 Competitive Feature Trust Levels
+
+| Feature | Hosted (Level 1) | Verified External (Level 2) | Notes |
+|---|---|---|---|
+| Dashboard & stats | Full | Full | Identical UX |
+| Badges & XP | Full | Full | Verified shares earn equally |
+| Streaks | Full | Full | Any verified share counts |
+| Leaderboards | Included | Separate + Combined views | Users can toggle |
+| World Cup | Full | Full (if cryptographically verified) | Team hashrate counted |
+| Betting | Full | Excluded | Highest trust required for money |
+| Cooperatives | Full | Full | Mixed source co-ops supported |
+
+### 19.7 Timeline
+
+This feature is planned for **Months 9-12** (after the core platform is stable). Development includes:
+
+- **Month 9-10:** TBG Proxy development (Go/Rust daemon + installer)
+- **Month 10-11:** Share Verification Service (independent proof validation)
+- **Month 11:** API endpoints for proxy communication
+- **Month 11-12:** Dashboard integration (source indicators, combined leaderboards)
+- **Month 12:** Beta with select self-hosted miners
+
+---
+
+## 20. Team & Roles
 
 | Role | Count | Responsibility |
 |------|-------|---------------|
@@ -1505,7 +1610,7 @@ While launching with Stratum V1 (ckpool native), we plan Stratum V2 support for 
 
 ---
 
-## 20. Timeline Summary
+## 21. Timeline Summary
 
 | Phase | Name | Duration | Dependencies |
 |-------|------|----------|-------------|
@@ -1523,13 +1628,15 @@ While launching with Stratum V1 (ckpool native), we plan Stratum V2 support for 
 | 10 | Lightning & Betting | Weeks 28-36 | Phase 6 |
 | 11 | Monetization (full) | Ongoing | All phases |
 | SV2 | Stratum V2 Integration | Months 6-12 | Phase 1 stable |
+| **12** | **Decentralized Mining (User-Run Pools)** | **Months 9-12** | **Phases 1-5 stable, SV2 Phase C** |
 
 **MVP target: ~5 months from project start**
 **Full platform: ~9 months from project start**
+**Decentralized mining: ~12 months from project start**
 
 ---
 
-## 21. Risk Register
+## 22. Risk Register
 
 | Risk | Severity | Probability | Mitigation |
 |------|----------|------------|------------|
@@ -1542,6 +1649,9 @@ While launching with Stratum V1 (ckpool native), we plan Stratum V2 support for 
 | Scaling issues under high miner count | Medium | Medium | ckpool handles 100k+ miners natively, horizontal scaling via passthrough nodes |
 | Security breach / hack | Critical | Low | Security audits, no custody of funds, minimal attack surface |
 | AI-generated content (match recaps) quality issues | Low | Medium | Human review, community feedback loop, iterative improvement |
+| Self-hosted miners submitting fraudulent shares | High | Medium | Cryptographic share proof verification, rate limiting, trust levels for competitive features |
+| TBG Proxy adoption too low to justify development | Medium | Medium | Start with hosted-only, build proxy only after proving platform value; keep proxy simple |
+| Regulatory risk from operating a mining pool | Medium | Low | Non-custodial design (miners mine to their own address), no custody of funds |
 
 ---
 
@@ -1584,6 +1694,49 @@ While launching with Stratum V1 (ckpool native), we plan Stratum V2 support for 
     "maxclients": 100000
 }
 ```
+
+---
+
+## 23. Detailed Documentation Index
+
+The project maintains comprehensive documentation beyond this plan. Below is the complete index:
+
+### Frontend Dashboard (Completed)
+
+| Document | Path | Description |
+|---|---|---|
+| Design Plan | `docs/thebitcoingame-design-plan.md` | Complete UI/UX design specification |
+| Product Overview | `docs/product-overview.md` | Product overview and feature descriptions |
+| Design Roadmap | `roadmap/design/00-overview.md` | Frontend implementation roadmap (11 phases, all completed) |
+
+### CKPool Service (Mining Engine)
+
+| Document | Path | Description |
+|---|---|---|
+| **Master Plan** | `docs/ckpool-service/00-master-plan.md` | Architecture, communication flows, event system, licensing |
+| **Decentralized Mining** | `docs/ckpool-service/decentralized-mining.md` | Future user-run pools/nodes feature design |
+| Roadmap Overview | `docs/ckpool-service/roadmap/00-overview.md` | Development roadmap index |
+| Phase 0: Foundation | `docs/ckpool-service/roadmap/phase-00-foundation.md` | Source study, dev environment, CI/CD |
+| Phase 1: Core Fork | `docs/ckpool-service/roadmap/phase-01-core-fork.md` | Event emission, diff tracking, event collector |
+| Phase 2: Testing | `docs/ckpool-service/roadmap/phase-02-testing.md` | Unit tests, integration tests, signet validation, load testing |
+| Phase 3: Enhanced Features | `docs/ckpool-service/roadmap/phase-03-enhanced-features.md` | Coinbase sigs, taproot, vardiff, health monitoring |
+| Phase 4: Multi-Instance | `docs/ckpool-service/roadmap/phase-04-multi-instance.md` | Geo-distribution, relay nodes, GeoDNS, failover |
+| Phase 5: Production | `docs/ckpool-service/roadmap/phase-05-production.md` | Security audit, optimization, mainnet deployment |
+| Phase 6: Stratum V2 | `docs/ckpool-service/roadmap/phase-06-stratum-v2.md` | SV2 proxy, native support, job negotiation |
+
+### Open-Source Documentation (Public Repository)
+
+| Document | Path | Description |
+|---|---|---|
+| README | `docs/ckpool-service/open-source/README.md` | Public repository README |
+| License Header | `docs/ckpool-service/open-source/LICENSE-HEADER.md` | GPLv3 header templates for source files |
+| Contributing Guide | `docs/ckpool-service/open-source/CONTRIBUTING.md` | How to contribute to the fork |
+| Changelog | `docs/ckpool-service/open-source/CHANGELOG.md` | Version history |
+| Architecture | `docs/ckpool-service/open-source/architecture.md` | Technical architecture for contributors |
+| Events | `docs/ckpool-service/open-source/events.md` | Event system documentation |
+| Configuration | `docs/ckpool-service/open-source/configuration.md` | Full configuration reference |
+| Building | `docs/ckpool-service/open-source/building.md` | Build from source guide |
+| Testing | `docs/ckpool-service/open-source/testing.md` | Test suite documentation |
 
 ---
 

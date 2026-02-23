@@ -1,0 +1,150 @@
+services:
+  # Bitcoin Core signet node (lightweight test network, ~500MB)
+  bitcoin-signet:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-bitcoin-signet
+    command:
+      - -signet
+      - -server=1
+      - -rpcuser=tbg
+      - -rpcpassword=tbgdev2026
+      - -rpcallowip=0.0.0.0/0
+      - -rpcbind=0.0.0.0
+      - -rpcport=38332
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+      - -txindex=1
+      - -fallbackfee=0.00001
+      - -dbcache=256
+    ports:
+      - "38332:38332"   # Signet RPC
+      - "28332:28332"   # ZMQ hashblock
+    volumes:
+      - bitcoin-signet-data:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-signet", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=38332", "getblockchaininfo"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  # CKPool mining engine (GPLv3 fork)
+  ckpool:
+    build:
+      context: ./ckpool
+      dockerfile: Dockerfile
+    container_name: tbg-ckpool
+    depends_on:
+      bitcoin-signet:
+        condition: service_healthy
+    ports:
+      - "3333:3333"     # Stratum port
+      - "9100:9100"     # Prometheus metrics
+    volumes:
+      - ckpool-logs:/var/log/ckpool
+      - ckpool-run:/var/run/ckpool
+      - ckpool-events:/tmp/ckpool
+      - ./ckpool/config:/etc/ckpool:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet.conf -s /var/run/ckpool -l 7"]
+    restart: unless-stopped
+
+  # Redis (event streams + pub/sub)
+  redis:
+    image: redis:7-alpine
+    container_name: tbg-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # TimescaleDB (PostgreSQL + time-series extensions)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: tbg-timescaledb
+    environment:
+      POSTGRES_USER: tbg
+      POSTGRES_PASSWORD: tbgdev2026
+      POSTGRES_DB: thebitcoingame
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./event-collector/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tbg -d thebitcoingame"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Event Collector (Python — reads from ckpool Unix socket, publishes to Redis + DB)
+  event-collector:
+    build:
+      context: ./event-collector
+      dockerfile: Dockerfile
+    container_name: tbg-event-collector
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - ckpool-events:/tmp/ckpool
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://tbg:tbgdev2026@timescaledb:5432/thebitcoingame
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      LOG_LEVEL: DEBUG
+      BATCH_FLUSH_INTERVAL: "1.0"
+      BATCH_MAX_SIZE: "500"
+      REDIS_STREAM_MAXLEN: "100000"
+    restart: unless-stopped
+
+  # Prometheus (metrics collection)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tbg-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    restart: unless-stopped
+
+  # Grafana (metrics dashboards)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tbg-grafana
+    ports:
+      - "3030:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: tbgdev2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    restart: unless-stopped
+
+volumes:
+  bitcoin-signet-data:
+  ckpool-logs:
+  ckpool-run:
+  ckpool-events:
+  redis-data:
+  timescaledb-data:
+  prometheus-data:
+  grafana-data:

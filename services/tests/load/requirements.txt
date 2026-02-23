@@ -1,0 +1,7 @@
+# TheBitcoinGame -- Stratum Load Tester
+# Core: uses Python 3.12 stdlib only (asyncio, json, socket)
+# No external dependencies are required to run the load test.
+#
+# Optional analysis dependencies (uncomment to install):
+# matplotlib>=3.8  # For generating latency distribution charts
+# pandas>=2.1      # For analyzing test result CSVs

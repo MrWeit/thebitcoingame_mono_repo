@@ -1,0 +1,19 @@
+# UPSTREAM.lock — Pins the exact ckpool version our patches are tested against
+# DO NOT edit manually. Update via: ./patches/update-lock.sh
+#
+# When upstream ckpool updates, you must:
+# 1. Clone the new version
+# 2. Test patches against it
+# 3. Fix any broken hooks
+# 4. Run ./patches/update-lock.sh to regenerate this file
+
+CKPOOL_REPO=https://bitbucket.org/ckolivas/ckpool.git
+CKPOOL_COMMIT=88e99e0b6fc7e28796c8450b42fa00070b66c6e3
+CKPOOL_VERSION=1.0
+CKPOOL_DATE=2025-01-15
+
+# SHA256 checksums of the unmodified source files we patch
+SHA256_STRATIFIER=4dfa73d4184d64cdd709a0794c6e3e54bf4c94a620cc6afa8cbb80d5c5ddd583
+SHA256_CKPOOL_H=5e9efeaeacceb2a396db6df9af572a23458feb60556d4c8793642c4102236101
+SHA256_CKPOOL_C=9121501b257836ab3d259c99e617e3be6685c7723a4dc3ad80883e8df46eaa49
+SHA256_BITCOIN_C=435d9363f11282608466cab4df5ceff592a114bf95f8817c4c7463db589662c1

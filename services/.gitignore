@@ -1,0 +1,81 @@
+# ============================================================
+# THE BITCOIN GAME — services/.gitignore
+# ============================================================
+
+# ── Secrets and credentials ──────────────────────────────────
+.env
+.env.local
+.env.production
+*.pem
+*.key
+*.crt
+secrets/
+
+# ── CKPool build artifacts ──────────────────────────────────
+ckpool/ckpool-src/
+ckpool/build/
+*.o
+*.a
+*.so
+*.d
+
+# ── Docker volumes and data ─────────────────────────────────
+data/
+volumes/
+postgres-data/
+redis-data/
+timescaledb-data/
+bitcoin-data/
+nats-data/
+
+# ── Backups (stored on host, not in repo) ───────────────────
+backups/
+*.dump
+*.dump.gz
+*.rdb
+
+# ── Monitoring data ─────────────────────────────────────────
+monitoring/prometheus/data/
+monitoring/grafana/data/
+monitoring/alertmanager/data/
+
+# ── Test results and profiling ──────────────────────────────
+tests/load/results/*.json
+tests/load/results/*.txt
+tests/load/results/*.log
+!tests/load/results/.gitkeep
+profiles/
+*.svg
+*.perf
+*.massif
+perf.data
+perf.data.old
+
+# ── Fuzzing artifacts ───────────────────────────────────────
+ckpool/fuzz/findings/
+ckpool/fuzz/crash-*
+ckpool/fuzz/hang-*
+ckpool/fuzz/queue/
+ckpool/fuzz/.synced/
+
+# ── Python artifacts ────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+
+# ── Logs ────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS and editor ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

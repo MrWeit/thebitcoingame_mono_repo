@@ -1,0 +1,282 @@
+# =============================================================================
+# TheBitcoinGame — CKPool Alert Rules
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# Two severity tiers:
+#   - critical: Immediate action required. Pages on-call engineer.
+#     These indicate the pool is down or losing money.
+#   - warning: Investigate within 30 minutes. Slack notification.
+#     These indicate degraded performance or emerging issues.
+#
+# All alerts include:
+#   - severity label for routing
+#   - summary annotation for the alert title
+#   - description annotation with metric values for context
+#   - runbook_url annotation pointing to operational docs
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # CRITICAL — Pool Down or Major Functionality Loss
+  # ===========================================================================
+  - name: ckpool_critical
+    rules:
+
+      # -----------------------------------------------------------------------
+      # CKPool Process Down
+      # -----------------------------------------------------------------------
+      # The ckpool scrape target is unreachable. This means the stratum
+      # server is not running and NO miners can connect or submit shares.
+      # Revenue impact: 100% — all mining revenue stops immediately.
+      - alert: CKPoolProcessDown
+        expr: up{job="ckpool"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: mining
+        annotations:
+          summary: "CKPool process is down"
+          description: >-
+            The CKPool stratum server has been unreachable for more than 1 minute.
+            No miners can connect and all share submission has stopped.
+            Current up status: {{ $value }}.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/ckpool-down"
+
+      # -----------------------------------------------------------------------
+      # Bitcoin Core Desync
+      # -----------------------------------------------------------------------
+      # CKPool reports block height as 0 or the metric is completely absent.
+      # This means CKPool cannot communicate with Bitcoin Core to get new
+      # block templates. Miners will be working on stale blocks.
+      # Revenue impact: 100% — all mined blocks will be orphaned.
+      - alert: BitcoinCoreDesync
+        expr: ckpool_bitcoin_height == 0 or absent(ckpool_bitcoin_height)
+        for: 2m
+        labels:
+          severity: critical
+          team: mining
+        annotations:
+          summary: "CKPool cannot reach Bitcoin Core — block height is 0 or absent"
+          description: >-
+            CKPool has reported a bitcoin block height of 0 or the metric is
+            absent for more than 2 minutes. This indicates Bitcoin Core RPC
+            is unreachable. All miners are working on invalid block templates.
+            Current height: {{ $value }}.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-desync"
+
+      # -----------------------------------------------------------------------
+      # Zero Shares with Active Miners
+      # -----------------------------------------------------------------------
+      # Miners are connected but no valid shares are being submitted.
+      # This could indicate: stratum protocol issues, vardiff misconfiguration,
+      # network partition between miners and the pool, or a bug in share
+      # validation logic.
+      - alert: ZeroSharesReceived
+        expr: >-
+          rate(ckpool_shares_valid_total[5m]) == 0
+          and
+          ckpool_connected_miners > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: mining
+        annotations:
+          summary: "No valid shares received despite {{ $value }} connected miners"
+          description: >-
+            The pool has connected miners but has received zero valid shares
+            in the last 5 minutes. Connected miners: {{ with query "ckpool_connected_miners" }}{{ . | first | value }}{{ end }}.
+            This likely indicates a stratum protocol issue or share validation bug.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/zero-shares"
+
+      # -----------------------------------------------------------------------
+      # Block Orphaned After Submission
+      # -----------------------------------------------------------------------
+      # A block was found AND an orphan was recorded in the same time window.
+      # This means we successfully found a block but it was rejected by the
+      # Bitcoin network — likely due to propagation delay or stale template.
+      # Revenue impact: One full block reward lost (~3.125 BTC + fees).
+      - alert: BlockSubmitOrphaned
+        expr: >-
+          increase(ckpool_blocks_orphaned_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: mining
+        annotations:
+          summary: "Block orphaned — potential revenue loss"
+          description: >-
+            A mined block has been orphaned in the last hour.
+            Orphaned blocks in last hour: {{ $value }}.
+            This means block reward revenue was lost. Investigate block
+            propagation times and template update latency.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/block-orphaned"
+
+  # ===========================================================================
+  # WARNING — Degraded Performance, Investigate Soon
+  # ===========================================================================
+  - name: ckpool_warning
+    rules:
+
+      # -----------------------------------------------------------------------
+      # High Invalid Share Rate
+      # -----------------------------------------------------------------------
+      # More than 10% of submitted shares are invalid. Normal pools see <1%.
+      # Causes: misconfigured miners, hashrate spoofing attempts, vardiff
+      # issues, or an attacker probing the stratum protocol.
+      - alert: HighInvalidShareRate
+        expr: >-
+          (
+            rate(ckpool_shares_invalid_total[5m])
+            /
+            (rate(ckpool_shares_valid_total[5m]) + rate(ckpool_shares_invalid_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: mining
+        annotations:
+          summary: "Invalid share rate above 10%"
+          description: >-
+            The ratio of invalid to total shares has exceeded 10% for the
+            last 5 minutes. Current invalid rate: {{ $value | humanizePercentage }}.
+            This may indicate misconfigured miners or an attack.
+            Check per-user invalid rates to identify the source.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/high-invalid-shares"
+
+      # -----------------------------------------------------------------------
+      # High Memory Usage
+      # -----------------------------------------------------------------------
+      # CKPool process resident memory exceeds 500MB. CKPool is written in C
+      # and should be very memory-efficient. High memory usually indicates
+      # a leak or an extreme number of connected clients.
+      - alert: HighMemoryUsage
+        expr: >-
+          process_resident_memory_bytes{job="ckpool"} > 524288000
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "CKPool memory usage above 500MB"
+          description: >-
+            CKPool resident memory has been above 500MB for 5 minutes.
+            Current usage: {{ $value | humanize1024 }}B.
+            CKPool is written in C and should use minimal memory.
+            This may indicate a memory leak or excessive client connections.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/ckpool-memory"
+
+      # -----------------------------------------------------------------------
+      # Sudden Miner Count Drop
+      # -----------------------------------------------------------------------
+      # Current miner count has dropped below 50% of the 1-hour average.
+      # This could indicate: network issues, stratum bugs causing
+      # disconnects, or a large miner leaving the pool.
+      - alert: MinerCountDrop
+        expr: >-
+          ckpool_connected_miners
+          <
+          0.5 * avg_over_time(ckpool_connected_miners[1h])
+        for: 5m
+        labels:
+          severity: warning
+          team: mining
+        annotations:
+          summary: "Miner count dropped below 50% of 1h average"
+          description: >-
+            Connected miners have dropped to {{ $value }}, which is less than
+            half the 1-hour average of {{ with query "avg_over_time(ckpool_connected_miners[1h])" }}{{ . | first | value | printf "%.0f" }}{{ end }}.
+            Check for network issues, stratum errors, or large miner departures.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/miner-drop"
+
+      # -----------------------------------------------------------------------
+      # Event Ring Buffer Drops
+      # -----------------------------------------------------------------------
+      # The TBG event ring buffer is dropping events. This means the event
+      # pipeline (Redis/TimescaleDB) cannot keep up with the event rate.
+      # Impact: Gamification events (shares, badges, XP) are being lost.
+      - alert: EventRingDrops
+        expr: >-
+          rate(ckpool_events_dropped_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Event ring buffer is dropping events"
+          description: >-
+            The CKPool event ring buffer has been dropping events for more
+            than 2 minutes. Drop rate: {{ $value | printf "%.2f" }}/s.
+            Events queued: {{ with query "ckpool_events_queued_total" }}{{ . | first | value | printf "%.0f" }}{{ end }}.
+            Events sent: {{ with query "ckpool_events_sent_total" }}{{ . | first | value | printf "%.0f" }}{{ end }}.
+            This means gamification data (shares, badges, XP) is being lost.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/event-drops"
+
+      # -----------------------------------------------------------------------
+      # High Share Processing Latency
+      # -----------------------------------------------------------------------
+      # The P99 share processing latency exceeds 50ms. This means at least
+      # 1% of shares are taking too long to validate. High latency causes
+      # stale shares and reduces effective hashrate.
+      - alert: HighShareLatency
+        expr: >-
+          ckpool_share_processing_p99_ms > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: mining
+        annotations:
+          summary: "Share processing P99 latency above 50ms"
+          description: >-
+            The P99 share processing latency has exceeded 50ms for 5 minutes.
+            Current P99: {{ $value | printf "%.1f" }}ms.
+            This increases stale share rates and reduces effective miner hashrate.
+            Check Bitcoin Core RPC latency and CKPool CPU usage.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/share-latency"
+
+      # -----------------------------------------------------------------------
+      # High Stale Share Rate
+      # -----------------------------------------------------------------------
+      # More than 5% of shares are stale (submitted after a new block).
+      # This indicates slow block template updates or high network latency
+      # between miners and the pool.
+      - alert: HighStaleShareRate
+        expr: >-
+          (
+            rate(ckpool_shares_stale_total[5m])
+            /
+            (rate(ckpool_shares_valid_total[5m]) + rate(ckpool_shares_stale_total[5m]) + 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: mining
+        annotations:
+          summary: "Stale share rate above 5%"
+          description: >-
+            The stale share rate has exceeded 5% for the last 5 minutes.
+            Current stale rate: {{ $value | humanizePercentage }}.
+            Stale shares are valid work submitted after a new block was found.
+            Check block template update latency and ZMQ notification pipeline.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/stale-shares"
+
+      # -----------------------------------------------------------------------
+      # CKPool Uptime Reset
+      # -----------------------------------------------------------------------
+      # CKPool uptime counter decreased, indicating a restart.
+      # This is informational but important to track for reliability SLOs.
+      - alert: CKPoolRestarted
+        expr: >-
+          changes(ckpool_uptime_seconds[5m]) > 0
+          and
+          ckpool_uptime_seconds < 300
+        for: 0m
+        labels:
+          severity: warning
+          team: mining
+        annotations:
+          summary: "CKPool process restarted"
+          description: >-
+            CKPool has restarted. Current uptime: {{ $value | printf "%.0f" }}s.
+            Check logs for crash reasons. Frequent restarts indicate instability.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/ckpool-restart"

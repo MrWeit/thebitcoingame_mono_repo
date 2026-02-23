@@ -1,0 +1,224 @@
+# =============================================================================
+# TheBitcoinGame — Alertmanager Configuration
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# Alert routing strategy:
+#   1. All alerts are grouped by alertname + severity to reduce noise
+#   2. Critical alerts go to PagerDuty (immediate page) AND Slack
+#   3. Warning alerts go to Slack only
+#   4. Email receives all alerts as an audit trail
+#   5. Inhibition rules prevent warning noise when criticals are firing
+#
+# Configuration uses environment variable placeholders ($VAR) which are
+# resolved at container startup. Set them in your .env file or Docker secrets.
+#
+# Required environment variables:
+#   SMTP_FROM          — Sender email address
+#   SMTP_SMARTHOST     — SMTP server:port (e.g., smtp.gmail.com:587)
+#   SMTP_AUTH_USERNAME — SMTP login username
+#   SMTP_AUTH_PASSWORD — SMTP login password
+#   ALERT_EMAIL        — Destination email for all alerts
+#   PAGERDUTY_KEY      — PagerDuty integration/service key
+#   SLACK_WEBHOOK      — Slack incoming webhook URL
+# =============================================================================
+
+global:
+  # ---------------------------------------------------------------------------
+  # SMTP Configuration (for email alerts)
+  # ---------------------------------------------------------------------------
+  smtp_from: "$SMTP_FROM"
+  smtp_smarthost: "$SMTP_SMARTHOST"
+  smtp_auth_username: "$SMTP_AUTH_USERNAME"
+  smtp_auth_password: "$SMTP_AUTH_PASSWORD"
+  smtp_require_tls: true
+
+  # ---------------------------------------------------------------------------
+  # Default resolve timeout
+  # ---------------------------------------------------------------------------
+  # If an alert stops firing, Alertmanager waits this long before sending
+  # a "resolved" notification. 5 minutes prevents flip-flop noise.
+  resolve_timeout: 5m
+
+  # ---------------------------------------------------------------------------
+  # PagerDuty URL (default, can be overridden per-receiver)
+  # ---------------------------------------------------------------------------
+  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
+
+  # ---------------------------------------------------------------------------
+  # Slack API URL (default, can be overridden per-receiver)
+  # ---------------------------------------------------------------------------
+  slack_api_url: "$SLACK_WEBHOOK"
+
+# =============================================================================
+# Templates
+# =============================================================================
+# Custom notification templates for consistent formatting across channels.
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# =============================================================================
+# Routing Tree
+# =============================================================================
+route:
+  # Default grouping: alerts with the same name and severity are batched
+  # together into a single notification.
+  group_by:
+    - alertname
+    - severity
+
+  # How long to wait before sending the first notification for a new group.
+  # 30s allows related alerts to arrive and be batched together.
+  group_wait: 30s
+
+  # How long to wait before sending updates about new alerts added to an
+  # existing group that has already been notified.
+  group_interval: 5m
+
+  # How long to wait before re-sending a notification for a firing alert
+  # that has already been notified. 4h is a good balance between reminder
+  # frequency and notification fatigue.
+  repeat_interval: 4h
+
+  # Default receiver for all alerts not matched by child routes.
+  receiver: "email"
+
+  # ---------------------------------------------------------------------------
+  # Child Routes
+  # ---------------------------------------------------------------------------
+  routes:
+    # Critical alerts: page on-call engineer immediately via PagerDuty
+    # AND send to Slack for visibility. Email is also sent via the default.
+    - match:
+        severity: critical
+      receiver: "pagerduty"
+      # Critical alerts repeat more frequently — every 1 hour
+      repeat_interval: 1h
+      # Also send to Slack for team visibility
+      continue: true
+
+    - match:
+        severity: critical
+      receiver: "slack-critical"
+      continue: true
+
+    # Warning alerts: Slack notification only (no page)
+    - match:
+        severity: warning
+      receiver: "slack-warning"
+      # Warnings repeat every 4 hours
+      repeat_interval: 4h
+      continue: true
+
+# =============================================================================
+# Receivers
+# =============================================================================
+receivers:
+  # ---------------------------------------------------------------------------
+  # Email — Audit trail for all alerts
+  # ---------------------------------------------------------------------------
+  - name: "email"
+    email_configs:
+      - to: "$ALERT_EMAIL"
+        send_resolved: true
+        headers:
+          Subject: >-
+            [TBG {{ .Status | toUpper }}] {{ .GroupLabels.alertname }}
+            ({{ .GroupLabels.severity }})
+        html: |
+          <h2>{{ .Status | toUpper }}: {{ .GroupLabels.alertname }}</h2>
+          <p><strong>Severity:</strong> {{ .GroupLabels.severity }}</p>
+          {{ range .Alerts }}
+          <hr>
+          <p><strong>Summary:</strong> {{ .Annotations.summary }}</p>
+          <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+          <p><strong>Started:</strong> {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}</p>
+          {{ if .EndsAt }}<p><strong>Ended:</strong> {{ .EndsAt.Format "2006-01-02 15:04:05 UTC" }}</p>{{ end }}
+          {{ if .Annotations.runbook_url }}<p><a href="{{ .Annotations.runbook_url }}">Runbook</a></p>{{ end }}
+          {{ end }}
+
+  # ---------------------------------------------------------------------------
+  # PagerDuty — Critical alerts page on-call engineer
+  # ---------------------------------------------------------------------------
+  - name: "pagerduty"
+    pagerduty_configs:
+      - service_key: "$PAGERDUTY_KEY"
+        send_resolved: true
+        severity: >-
+          {{ if eq .GroupLabels.severity "critical" }}critical{{ else }}warning{{ end }}
+        description: >-
+          {{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}
+        details:
+          firing: "{{ .Alerts.Firing | len }}"
+          resolved: "{{ .Alerts.Resolved | len }}"
+          description: "{{ (index .Alerts 0).Annotations.description }}"
+
+  # ---------------------------------------------------------------------------
+  # Slack — Critical alerts channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-critical"
+    slack_configs:
+      - channel: "#mining-alerts"
+        send_resolved: true
+        color: >-
+          {{ if eq .Status "firing" }}danger{{ else }}good{{ end }}
+        title: >-
+          [{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}
+        title_link: >-
+          {{ (index .Alerts 0).GeneratorURL }}
+        text: >-
+          *Severity:* `{{ .GroupLabels.severity }}`
+          *Summary:* {{ (index .Alerts 0).Annotations.summary }}
+          *Description:* {{ (index .Alerts 0).Annotations.description }}
+          {{ if (index .Alerts 0).Annotations.runbook_url }}*Runbook:* {{ (index .Alerts 0).Annotations.runbook_url }}{{ end }}
+          *Firing:* {{ .Alerts.Firing | len }} | *Resolved:* {{ .Alerts.Resolved | len }}
+        icon_emoji: ":rotating_light:"
+        username: "TBG Alertmanager"
+
+  # ---------------------------------------------------------------------------
+  # Slack — Warning alerts channel
+  # ---------------------------------------------------------------------------
+  - name: "slack-warning"
+    slack_configs:
+      - channel: "#mining-alerts"
+        send_resolved: true
+        color: >-
+          {{ if eq .Status "firing" }}warning{{ else }}good{{ end }}
+        title: >-
+          [{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}
+        title_link: >-
+          {{ (index .Alerts 0).GeneratorURL }}
+        text: >-
+          *Severity:* `{{ .GroupLabels.severity }}`
+          *Summary:* {{ (index .Alerts 0).Annotations.summary }}
+          *Description:* {{ (index .Alerts 0).Annotations.description }}
+          {{ if (index .Alerts 0).Annotations.runbook_url }}*Runbook:* {{ (index .Alerts 0).Annotations.runbook_url }}{{ end }}
+        icon_emoji: ":warning:"
+        username: "TBG Alertmanager"
+
+# =============================================================================
+# Inhibition Rules
+# =============================================================================
+# Inhibition suppresses notifications for less severe alerts when a more
+# severe alert is already firing for the same issue.
+inhibit_rules:
+  # When a critical alert is firing, suppress the corresponding warning
+  # alert for the same alertname. This prevents duplicate notifications.
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    # Both must have the same alertname for inhibition to apply
+    equal:
+      - alertname
+
+  # When CKPool is completely down, suppress all other CKPool warnings.
+  # There is no point alerting about high invalid shares, memory, etc.
+  # when the process itself is not running.
+  - source_match:
+      alertname: "CKPoolProcessDown"
+      severity: "critical"
+    target_match_re:
+      alertname: "High.*|MinerCountDrop|EventRingDrops|ZeroSharesReceived"
+    equal:
+      - job

@@ -1,0 +1,35 @@
+# =============================================================================
+# TheBitcoinGame — Grafana Datasource Provisioning
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# Provisioned datasources are read-only in the Grafana UI.
+# Changes must be made here and Grafana restarted.
+#
+# The Prometheus datasource points to the Prometheus service within the
+# Docker network. All dashboards reference this datasource by uid "prometheus".
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  # ---------------------------------------------------------------------------
+  # Prometheus — Primary metrics datasource
+  # ---------------------------------------------------------------------------
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Time interval used to round scrape durations. Should match
+      # Prometheus global scrape_interval.
+      timeInterval: "15s"
+      # Query timeout — prevents Grafana from hanging on slow queries
+      queryTimeout: "60s"
+      # HTTP method for queries — POST avoids URL length limits on
+      # complex queries
+      httpMethod: POST
+    version: 1

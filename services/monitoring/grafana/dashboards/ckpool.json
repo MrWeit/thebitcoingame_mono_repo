@@ -1,0 +1,84 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Connected Miners",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "ckpool_connected_miners", "legendFormat": "miners" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }] } } }
+    },
+    {
+      "title": "Bitcoin Block Height",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "ckpool_bitcoin_height", "legendFormat": "height" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "blue", "value": null }] } } }
+    },
+    {
+      "title": "Blocks Found",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "ckpool_blocks_found_total", "legendFormat": "blocks" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "orange", "value": null }] } } }
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "ckpool_uptime_seconds", "legendFormat": "seconds" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [{ "color": "green", "value": null }] } } }
+    },
+    {
+      "title": "Share Rate (per second)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(ckpool_shares_valid_total[1m])", "legendFormat": "valid/s" },
+        { "expr": "rate(ckpool_shares_invalid_total[1m])", "legendFormat": "invalid/s" },
+        { "expr": "rate(ckpool_shares_stale_total[1m])", "legendFormat": "stale/s" }
+      ]
+    },
+    {
+      "title": "Total Shares",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "ckpool_shares_valid_total", "legendFormat": "valid" },
+        { "expr": "ckpool_shares_invalid_total", "legendFormat": "invalid" },
+        { "expr": "ckpool_shares_stale_total", "legendFormat": "stale" }
+      ]
+    },
+    {
+      "title": "AsicBoost Miners Detected",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 12 },
+      "targets": [{ "expr": "ckpool_asicboost_miners_total", "legendFormat": "asicboost" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "purple", "value": null }] } } }
+    },
+    {
+      "title": "Total Difficulty Accepted",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 12 },
+      "targets": [{ "expr": "ckpool_total_diff_accepted_total", "legendFormat": "diff" }]
+    },
+    {
+      "title": "Connected Miners (over time)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [{ "expr": "ckpool_connected_miners", "legendFormat": "miners" }]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["ckpool", "mining"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "CKPool Mining Dashboard",
+  "uid": "ckpool-main"
+}

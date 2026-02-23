@@ -1,0 +1,181 @@
+# =============================================================================
+# TheBitcoinGame — Bitcoin Core Alert Rules
+# Phase 5: Production Hardening
+# =============================================================================
+#
+# Bitcoin Core health is foundational to pool operation. If Bitcoin Core is
+# down or desynchronized, CKPool cannot generate valid block templates and
+# all mining revenue is at risk.
+#
+# These metrics come from a Bitcoin Core Prometheus exporter or from CKPool
+# itself which exposes some Bitcoin Core state via its own metrics endpoint.
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # CRITICAL — Bitcoin Core Down or Severely Desynchronized
+  # ===========================================================================
+  - name: bitcoin_critical
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Bitcoin Core Down
+      # -----------------------------------------------------------------------
+      # The Bitcoin Core node is completely unreachable. This is an upstream
+      # dependency for CKPool — without it, no new block templates can be
+      # generated and all mining work is wasted.
+      #
+      # Note: We check the "bitcoin" job (from a dedicated bitcoin exporter)
+      # as well as inferring from CKPool's own bitcoin_height metric going
+      # absent. The for: 2m avoids alerting on brief RPC hiccups during
+      # block processing.
+      - alert: BitcoinCoreDown
+        expr: >-
+          up{job="ckpool"} == 1
+          and
+          (
+            ckpool_bitcoin_height == 0
+            or
+            absent(ckpool_bitcoin_height)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Bitcoin Core is unreachable from CKPool"
+          description: >-
+            CKPool is running but cannot communicate with Bitcoin Core.
+            Block height is 0 or absent for more than 2 minutes.
+            CKPool cannot generate new block templates without Bitcoin Core.
+            All mining work is effectively wasted until this is resolved.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-core-down"
+
+      # -----------------------------------------------------------------------
+      # Bitcoin Core Behind (Blocks vs Headers)
+      # -----------------------------------------------------------------------
+      # The node's validated block count is more than 3 behind the header
+      # count. This means the node is still syncing or has fallen behind
+      # due to disk I/O issues, high CPU load, or network problems.
+      #
+      # When behind, CKPool will use stale templates leading to orphaned blocks.
+      # 3 blocks is chosen because Bitcoin Core normally validates blocks
+      # within seconds of receiving them. A gap of 3+ is abnormal.
+      - alert: BitcoinCoreBehind
+        expr: >-
+          bitcoin_blocks < (bitcoin_headers - 3)
+        for: 10m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Bitcoin Core is {{ $value }} blocks behind header chain"
+          description: >-
+            Bitcoin Core's validated block height is more than 3 blocks behind
+            the header chain for 10 minutes. Current blocks: {{ with query "bitcoin_blocks" }}{{ . | first | value | printf "%.0f" }}{{ end }},
+            headers: {{ with query "bitcoin_headers" }}{{ . | first | value | printf "%.0f" }}{{ end }}.
+            The node may be experiencing disk I/O issues or high CPU load.
+            CKPool is likely generating stale block templates.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-behind"
+
+  # ===========================================================================
+  # WARNING — Degraded Bitcoin Core Health
+  # ===========================================================================
+  - name: bitcoin_warning
+    rules:
+
+      # -----------------------------------------------------------------------
+      # Low Peer Connections
+      # -----------------------------------------------------------------------
+      # Bitcoin Core has fewer than 4 peer connections. The default target
+      # is 8 outbound + up to 125 inbound. Fewer than 4 means the node
+      # has poor network connectivity and may:
+      #   - Receive new blocks late (increasing orphan risk)
+      #   - Fail to propagate our found blocks quickly
+      #   - Eventually lose sync entirely
+      - alert: BitcoinCoreConnectionsLow
+        expr: >-
+          bitcoin_connections < 4
+        for: 10m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Bitcoin Core has only {{ $value }} peer connections"
+          description: >-
+            Bitcoin Core has fewer than 4 peer connections for 10 minutes.
+            Current connections: {{ $value }}.
+            Low connectivity increases block propagation latency and orphan risk.
+            Check firewall rules, port 8333 accessibility, and addnode configuration.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-connections"
+
+      # -----------------------------------------------------------------------
+      # High Mempool Size
+      # -----------------------------------------------------------------------
+      # The mempool has grown above 100,000 transactions. A large mempool
+      # increases Bitcoin Core's memory usage and RPC response times.
+      # This can slow down GBT (getblocktemplate) calls that CKPool depends on.
+      #
+      # A very large mempool is normal during fee spikes but prolonged high
+      # levels can cause OOM kills if Bitcoin Core is not properly configured.
+      - alert: BitcoinCoreHighMempool
+        expr: >-
+          bitcoin_mempool_size > 100000
+        for: 15m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Bitcoin Core mempool has {{ $value }} transactions"
+          description: >-
+            The Bitcoin Core mempool has exceeded 100,000 transactions for
+            15 minutes. Current size: {{ $value | printf "%.0f" }} transactions.
+            Large mempools increase RPC latency (affecting GBT calls) and
+            memory usage. Consider adjusting maxmempool or mempoolminfee
+            if this persists.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-mempool"
+
+      # -----------------------------------------------------------------------
+      # Bitcoin Core Block Stagnation
+      # -----------------------------------------------------------------------
+      # No new blocks have been seen in over 2 hours. While Bitcoin's
+      # 10-minute average block time means gaps of 1+ hour are normal,
+      # 2+ hours is unusual enough to warrant investigation.
+      # This could also indicate our node has been partitioned from the network.
+      - alert: BitcoinBlockStagnation
+        expr: >-
+          time() - bitcoin_latest_block_time > 7200
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "No new Bitcoin block in over 2 hours"
+          description: >-
+            Bitcoin Core has not received a new block in over 2 hours.
+            While long gaps between blocks can occur naturally, this may
+            indicate a network partition or stalled sync.
+            Check peer connections and network health.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/block-stagnation"
+
+      # -----------------------------------------------------------------------
+      # Bitcoin Core High RPC Latency
+      # -----------------------------------------------------------------------
+      # GBT (getblocktemplate) calls are the critical path for mining.
+      # If RPC latency exceeds 2 seconds, block template updates will be
+      # delayed, increasing stale share rates.
+      - alert: BitcoinRPCLatencyHigh
+        expr: >-
+          bitcoin_rpc_duration_seconds{method="getblocktemplate"} > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "Bitcoin Core GBT RPC latency above 2s"
+          description: >-
+            The getblocktemplate RPC call latency has exceeded 2 seconds
+            for 5 minutes. Current latency: {{ $value | printf "%.2f" }}s.
+            This delays block template updates and increases stale share rates.
+            Check Bitcoin Core CPU usage, disk I/O, and mempool size.
+          runbook_url: "https://wiki.thebitcoingame.com/runbooks/bitcoin-rpc-latency"

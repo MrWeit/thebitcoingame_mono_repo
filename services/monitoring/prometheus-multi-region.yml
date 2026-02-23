@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'ckpool-eu'
+    static_configs:
+      - targets: ['ckpool-eu:9100']
+        labels:
+          region: 'eu-west'
+          role: 'primary'
+    scrape_interval: 5s
+
+  - job_name: 'ckpool-us'
+    static_configs:
+      - targets: ['ckpool-us:9100']
+        labels:
+          region: 'us-east'
+          role: 'relay'
+    scrape_interval: 5s
+
+  - job_name: 'ckpool-asia'
+    static_configs:
+      - targets: ['ckpool-asia:9100']
+        labels:
+          region: 'ap-south'
+          role: 'relay'
+    scrape_interval: 5s
+
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']
+    metrics_path: '/varz'
+    scrape_interval: 10s

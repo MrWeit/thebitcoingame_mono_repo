@@ -1,0 +1,135 @@
+## TheBitcoinGame Mining Engine — Production Docker Build
+## Based on ckpool by Con Kolivas (GPLv3)
+##
+## Multi-stage hardened build:
+##   Stage 1 (builder): Compile ckpool with TBG patches + hardened flags
+##   Stage 2 (runtime): Minimal Ubuntu with non-root user, <100MB target
+##
+## Build: docker build -f Dockerfile.production -t tbg-ckpool:prod .
+## Run:   docker run --env-file ../.env.production tbg-ckpool:prod
+
+# =============================================================================
+# Stage 1: Builder
+# =============================================================================
+FROM ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    yasm \
+    libjansson-dev \
+    libhiredis-dev \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Clone official ckpool at pinned commit
+RUN git clone https://bitbucket.org/ckolivas/ckpool.git /build/ckpool-src && \
+    cd /build/ckpool-src && \
+    git checkout 88e99e0b6fc7e28796c8450b42fa00070b66c6e3
+
+WORKDIR /build/ckpool-src
+
+# Copy patches and TBG source files
+COPY patches/ /build/patches/
+COPY src/ /build/tbg-src/
+
+# Apply TBG patches
+RUN chmod +x /build/patches/apply-patches.sh /build/patches/[0-9][0-9]-*.sh && \
+    /build/patches/apply-patches.sh /build/ckpool-src
+
+# Copy TBG extension source files into ckpool source tree
+RUN cp /build/tbg-src/tbg_*.c /build/tbg-src/tbg_*.h /build/ckpool-src/src/ && \
+    if ls /build/tbg-src/event_ring.* 1>/dev/null 2>&1; then \
+        cp /build/tbg-src/event_ring.* /build/ckpool-src/src/; \
+    fi && \
+    if ls /build/tbg-src/input_validation.* 1>/dev/null 2>&1; then \
+        cp /build/tbg-src/input_validation.* /build/ckpool-src/src/; \
+    fi && \
+    if ls /build/tbg-src/rate_limit.* 1>/dev/null 2>&1; then \
+        cp /build/tbg-src/rate_limit.* /build/ckpool-src/src/; \
+    fi && \
+    if ls /build/tbg-src/memory_pool.* 1>/dev/null 2>&1; then \
+        cp /build/tbg-src/memory_pool.* /build/ckpool-src/src/; \
+    fi
+
+# Build with hardened compiler flags
+ENV CFLAGS="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security -fPIE -Werror=format-security"
+ENV LDFLAGS="-pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack"
+
+RUN ./autogen.sh && \
+    ./configure --prefix=/opt/ckpool --without-ckdb && \
+    make -j$(nproc)
+
+# Install manually (skip `make install` which tries setcap and fails in Docker)
+RUN mkdir -p /build/install/opt/ckpool/bin && \
+    cp src/ckpool src/ckpmsg src/notifier /build/install/opt/ckpool/bin/ && \
+    strip /build/install/opt/ckpool/bin/*
+
+# =============================================================================
+# Stage 2: Runtime (minimal)
+# =============================================================================
+FROM ubuntu:22.04
+
+LABEL maintainer="The Bitcoin Game <infra@thebitcoingame.io>"
+LABEL description="TheBitcoinGame CKPool Mining Engine (Production)"
+LABEL license="GPL-3.0"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies + curl for healthcheck + gettext for envsubst
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libjansson4 \
+    libhiredis0.14 \
+    curl \
+    gettext-base \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /tmp/* /var/tmp/*
+
+# Create non-root user
+RUN groupadd -g 1000 ckpool && \
+    useradd -u 1000 -g ckpool -d /home/ckpool -m -s /bin/false ckpool
+
+# Copy built binaries from builder stage
+COPY --from=builder /build/install/opt/ckpool /opt/ckpool
+
+# Create necessary directories with proper ownership
+RUN mkdir -p /var/log/ckpool /var/run/ckpool /tmp/ckpool /etc/ckpool && \
+    chown -R ckpool:ckpool /var/log/ckpool /var/run/ckpool /tmp/ckpool /etc/ckpool
+
+# Copy configuration template (envsubst will fill in secrets at runtime)
+COPY config/ckpool-mainnet.conf /etc/ckpool/ckpool-mainnet.conf.template
+
+# Copy and set up entrypoint
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Add ckpool to PATH
+ENV PATH="/opt/ckpool/bin:${PATH}"
+
+# Stratum port
+EXPOSE 3333
+
+# Prometheus metrics endpoint
+EXPOSE 9100
+
+# Health check: query the Prometheus metrics endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:9100/metrics || exit 1
+
+# Use SIGTERM for graceful shutdown (ckpool handles it natively)
+STOPSIGNAL SIGTERM
+
+# Run as non-root
+USER ckpool
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["-c", "/etc/ckpool/ckpool-mainnet.conf", "-s", "/var/run/ckpool", "-l", "5"]

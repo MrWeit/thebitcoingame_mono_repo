@@ -1,0 +1,330 @@
+# TheBitcoinGame — Production Docker Compose
+# CKPool (GPLv3) + Bitcoin Core + Event Pipeline + Monitoring
+#
+# Usage:
+#   1. cp .env.example .env.production
+#   2. ./scripts/generate_secrets.sh > .env.production  (or edit manually)
+#   3. docker compose -f docker-compose.production.yml --env-file .env.production up -d
+#
+# Security notes:
+#   - Only Stratum (3333) and metrics (9100) are exposed externally
+#   - All inter-service communication happens on the internal network
+#   - Secrets are injected via environment variables, never baked into images
+#   - All services run with resource limits and restart policies
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+services:
+  # ===========================================================================
+  # Bitcoin Core — Mainnet Full Node
+  # ===========================================================================
+  bitcoin-core:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-bitcoin-mainnet
+    <<: *default-restart
+    logging: *default-logging
+    command:
+      - -conf=/etc/bitcoin/bitcoin.conf
+    volumes:
+      - bitcoin-mainnet-data:/home/bitcoin/.bitcoin
+      - ./bitcoin-node/bitcoin-mainnet.conf:/etc/bitcoin/bitcoin.conf:ro
+    networks:
+      - tbg-internal
+    # No ports exposed — only accessible from internal network
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+        reservations:
+          cpus: "2"
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-conf=/etc/bitcoin/bitcoin.conf", "getblockchaininfo"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 300s
+
+  # ===========================================================================
+  # CKPool — Stratum Mining Engine (GPLv3)
+  # ===========================================================================
+  ckpool:
+    build:
+      context: ./ckpool
+      dockerfile: Dockerfile.production
+    image: tbg-ckpool:production
+    container_name: tbg-ckpool-mainnet
+    <<: *default-restart
+    logging: *default-logging
+    depends_on:
+      bitcoin-core:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      BITCOIN_RPC_USER: ${BITCOIN_RPC_USER}
+      BITCOIN_RPC_PASS: ${BITCOIN_RPC_PASS}
+    ports:
+      - "3333:3333"   # Stratum — miners connect here
+      - "9100:9100"   # Prometheus metrics
+    volumes:
+      - ckpool-logs:/var/log/ckpool
+      - ckpool-run:/var/run/ckpool
+      - ckpool-events:/tmp/ckpool
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          cpus: "2"
+          memory: 1G
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_max_syn_backlog=65535
+
+  # ===========================================================================
+  # Redis — Event Streams + Caching
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: tbg-redis-prod
+    <<: *default-restart
+    logging: *default-logging
+    command: >-
+      redis-server
+      --appendonly yes
+      --maxmemory 1536mb
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
+      --tcp-backlog 511
+      --timeout 0
+      --tcp-keepalive 300
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis-data:/data
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ===========================================================================
+  # TimescaleDB — Time-Series Event Storage
+  # ===========================================================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: tbg-timescaledb-prod
+    <<: *default-restart
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: thebitcoingame
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      - ./event-collector/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 8G
+        reservations:
+          cpus: "1"
+          memory: 2G
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_connections=200
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_buffers=64MB
+      - -c
+      - random_page_cost=1.1
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d thebitcoingame"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # ===========================================================================
+  # Event Collector — CKPool -> Redis + TimescaleDB
+  # ===========================================================================
+  event-collector:
+    build:
+      context: ./event-collector
+      dockerfile: Dockerfile
+    image: tbg-event-collector:production
+    container_name: tbg-event-collector-prod
+    <<: *default-restart
+    logging: *default-logging
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    volumes:
+      - ckpool-events:/tmp/ckpool
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/thebitcoingame
+      SOCKET_PATH: /tmp/ckpool/events.sock
+      LOG_LEVEL: INFO
+      BATCH_FLUSH_INTERVAL: "2.0"
+      BATCH_MAX_SIZE: "1000"
+      REDIS_STREAM_MAXLEN: "500000"
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # ===========================================================================
+  # Prometheus — Metrics Collection
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: tbg-prometheus-prod
+    <<: *default-restart
+    logging: *default-logging
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=90d
+      - --storage.tsdb.retention.size=50GB
+      - --web.enable-lifecycle
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ===========================================================================
+  # Grafana — Monitoring Dashboards
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: tbg-grafana-prod
+    <<: *default-restart
+    logging: *default-logging
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_STRICT_TRANSPORT_SECURITY: "true"
+    networks:
+      - tbg-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  tbg-internal:
+    driver: bridge
+    internal: false  # Allow outbound for Bitcoin p2p; firewall controls inbound
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  bitcoin-mainnet-data:
+    driver: local
+  ckpool-logs:
+    driver: local
+  ckpool-run:
+    driver: local
+  ckpool-events:
+    driver: local
+  redis-data:
+    driver: local
+  timescaledb-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
