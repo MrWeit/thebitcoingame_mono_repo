@@ -48,6 +48,8 @@ The mining engine is written in C and remains open-source. The dashboard, API, g
 
 > **Detailed ckpool documentation:** The mining engine has its own comprehensive documentation at `docs/ckpool-service/`. This includes the master plan, development roadmap (7 phases), open-source documentation templates, and the decentralized mining feature design.
 
+> **Backend service documentation:** The Python API layer (FastAPI), gamification engine, background workers, and dashboard integration are documented at `docs/backend-service/`. This includes the master plan (~44 database tables, ~100 REST endpoints, 4 WebSocket channels), an 11-phase development roadmap, and implementation prompts for each phase at `docs/prompts/prompt-backend-phase{0-10}.md`.
+
 ---
 
 ## 2. System Architecture Overview
@@ -1737,6 +1739,42 @@ The project maintains comprehensive documentation beyond this plan. Below is the
 | Configuration | `docs/ckpool-service/open-source/configuration.md` | Full configuration reference |
 | Building | `docs/ckpool-service/open-source/building.md` | Build from source guide |
 | Testing | `docs/ckpool-service/open-source/testing.md` | Test suite documentation |
+
+### Backend Service (Python API + Dashboard Integration)
+
+| Document | Path | Description |
+|---|---|---|
+| **Master Plan** | `docs/backend-service/00-master-plan.md` | Full architecture, ~44 tables, ~100 endpoints, service components, data flows |
+| Roadmap Overview | `docs/backend-service/roadmap/00-overview.md` | 11-phase roadmap index with gantt chart and dependencies |
+| Phase 0: Foundation | `docs/backend-service/roadmap/phase-00-foundation.md` | FastAPI scaffolding, Docker, Alembic, middleware, CI/CD |
+| Phase 1: Authentication | `docs/backend-service/roadmap/phase-01-authentication.md` | Bitcoin message signing, JWT, user CRUD, settings, API keys |
+| Phase 2: Mining Data | `docs/backend-service/roadmap/phase-02-mining-data.md` | Workers, shares, hashrate, blocks, event consumers |
+| Phase 3: Dashboard RT | `docs/backend-service/roadmap/phase-03-dashboard-realtime.md` | WebSocket, live feeds, stats aggregation, frontend wiring |
+| Phase 4: Gamification | `docs/backend-service/roadmap/phase-04-gamification.md` | Badge engine, XP/levels, streaks, trigger pipeline |
+| Phase 5: Games & Lottery | `docs/backend-service/roadmap/phase-05-games-lottery.md` | Weekly lottery, game data, sessions |
+| Phase 6: Competition | `docs/backend-service/roadmap/phase-06-competition.md` | Leaderboards, World Cup, leagues |
+| Phase 7: Social | `docs/backend-service/roadmap/phase-07-social-cooperatives.md` | Cooperatives, notifications, activity feed, public profiles |
+| Phase 8: Education | `docs/backend-service/roadmap/phase-08-education.md` | Tracks, lessons, completion, XP integration |
+| Phase 9: Integration | `docs/backend-service/roadmap/phase-09-frontend-integration.md` | Replace all mocks, TanStack Query, E2E tests |
+| Phase 10: Production | `docs/backend-service/roadmap/phase-10-production.md` | Security audit, performance, monitoring, deployment |
+
+### Implementation Prompts (for AI Agents)
+
+| Document | Path | Description |
+|---|---|---|
+| CKPool Phase 1 | `docs/prompts/prompt-ckpool-phase1.md` | CKPool core fork + event system |
+| CKPool Phases 2-6 | `docs/prompts/prompt-ckpool-phase{2-6}.md` | CKPool testing, features, multi-instance, production, SV2 |
+| Backend Phase 0 | `docs/prompts/prompt-backend-phase0.md` | Foundation & project setup |
+| Backend Phase 1 | `docs/prompts/prompt-backend-phase1.md` | Authentication & user management |
+| Backend Phase 2 | `docs/prompts/prompt-backend-phase2.md` | Mining data API |
+| Backend Phase 3 | `docs/prompts/prompt-backend-phase3.md` | Dashboard & real-time |
+| Backend Phase 4 | `docs/prompts/prompt-backend-phase4.md` | Gamification engine |
+| Backend Phase 5 | `docs/prompts/prompt-backend-phase5.md` | Games & lottery |
+| Backend Phase 6 | `docs/prompts/prompt-backend-phase6.md` | Competition system |
+| Backend Phase 7 | `docs/prompts/prompt-backend-phase7.md` | Social & cooperatives |
+| Backend Phase 8 | `docs/prompts/prompt-backend-phase8.md` | Education system |
+| Backend Phase 9 | `docs/prompts/prompt-backend-phase9.md` | Frontend integration |
+| Backend Phase 10 | `docs/prompts/prompt-backend-phase10.md` | Production hardening |
 
 ---
 
