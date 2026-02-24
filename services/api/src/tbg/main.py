@@ -7,9 +7,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from tbg.auth.router import router as auth_router
+from tbg.competition.router import router as competition_router
 from tbg.config import get_settings
 from tbg.dashboard.router import router as dashboard_router
 from tbg.database import close_db, get_session, init_db
+from tbg.education.router import router as education_router
 from tbg.gamification.router import router as gamification_router
 from tbg.games.router import router as games_router
 from tbg.gamification.seed import seed_badges
@@ -17,6 +19,8 @@ from tbg.health.router import router as health_router
 from tbg.middleware import setup_middleware
 from tbg.mining.router import router as mining_router
 from tbg.redis_client import close_redis, get_redis, init_redis
+from tbg.social.notification_router import router as notification_router
+from tbg.social.router import router as social_router
 from tbg.users.router import router as users_router
 from tbg.ws.bridge import PubSubBridge
 from tbg.ws.router import router as ws_router
@@ -78,6 +82,10 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(gamification_router)
     app.include_router(games_router)
+    app.include_router(competition_router)
+    app.include_router(social_router)
+    app.include_router(notification_router)
+    app.include_router(education_router)
     app.include_router(ws_router)
 
     return app

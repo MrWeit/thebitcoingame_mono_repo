@@ -1,0 +1,52 @@
+## Vanilla CKPool with signet support only (for testing)
+## No TBG patches — just upstream + signet GBT rules fix
+
+FROM ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    build-essential autoconf automake libtool pkg-config \
+    yasm libjansson-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone https://bitbucket.org/ckolivas/ckpool.git /build/ckpool-src && \
+    cd /build/ckpool-src && \
+    git checkout 88e99e0b6fc7e28796c8450b42fa00070b66c6e3
+
+WORKDIR /build/ckpool-src
+
+# Apply ONLY signet support patch (add "signet" to GBT rules + understood_rules)
+RUN sed -i 's/\\"rules\\" : \[\\"segwit\\"\]/\\"rules\\" : [\\"segwit\\", \\"signet\\"]/' src/bitcoin.c && \
+    sed -i 's/understood_rules\[\] = {"segwit"}/understood_rules[] = {"segwit", "signet"}/' src/bitcoin.c && \
+    grep -q 'signet' src/bitcoin.c && echo "Signet patch applied" || (echo "FATAL: signet patch failed" && exit 1)
+
+RUN ./autogen.sh && \
+    ./configure --prefix=/opt/ckpool --without-ckdb && \
+    make -j$(nproc)
+
+RUN mkdir -p /build/install/opt/ckpool/bin && \
+    cp src/ckpool src/ckpmsg src/notifier /build/install/opt/ckpool/bin/
+
+# --- Runtime ---
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    libjansson4 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/install/opt/ckpool /opt/ckpool
+
+RUN mkdir -p /var/log/ckpool /var/run/ckpool /tmp/ckpool /etc/ckpool && \
+    chmod 777 /tmp/ckpool /var/log/ckpool /var/run/ckpool
+
+ENV PATH="/opt/ckpool/bin:${PATH}"
+
+EXPOSE 3333
+
+ENTRYPOINT ["ckpool"]
+CMD ["-c", "/etc/ckpool/ckpool-signet.conf", "-s", "/var/run/ckpool", "-l", "7"]

@@ -618,6 +618,269 @@ class GameSession(Base):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 6: Competition System
+# ---------------------------------------------------------------------------
+
+
+class LeaderboardSnapshot(Base):
+    """Historical leaderboard snapshots for rank change calculation."""
+
+    __tablename__ = "leaderboard_snapshots"
+    __table_args__ = (
+        UniqueConstraint("period", "period_key", "user_id", name="lb_snapshots_period_user_key"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    period: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CountryRanking(Base):
+    """Country-level ranking aggregates."""
+
+    __tablename__ = "country_rankings"
+    __table_args__ = (
+        UniqueConstraint("country_code", "period_key", name="country_rankings_code_period_key"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    country_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    period_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    miner_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_hashrate: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Competition(Base):
+    """Competition events (e.g., World Cup)."""
+
+    __tablename__ = "competitions"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default="upcoming")
+    start_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    end_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    teams: Mapped[list[CompetitionTeam]] = relationship("CompetitionTeam", back_populates="competition", cascade="all, delete-orphan")
+    matches: Mapped[list[Match]] = relationship("Match", back_populates="competition", cascade="all, delete-orphan")
+
+
+class CompetitionTeam(Base):
+    """Country team in a competition."""
+
+    __tablename__ = "competition_teams"
+    __table_args__ = (
+        UniqueConstraint("competition_id", "country_code", name="comp_teams_comp_country_key"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    competition_id: Mapped[int] = mapped_column(Integer, ForeignKey("competitions.id", ondelete="CASCADE"), nullable=False)
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False)
+    country_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    group_name: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    points: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    played: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    won: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    drawn: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    lost: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    hashrate: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+
+    competition: Mapped[Competition] = relationship("Competition", back_populates="teams")
+    registrations: Mapped[list[CompetitionRegistration]] = relationship("CompetitionRegistration", back_populates="team")
+
+
+class CompetitionRegistration(Base):
+    """Individual miner registration for a competition."""
+
+    __tablename__ = "competition_registrations"
+    __table_args__ = (
+        UniqueConstraint("competition_id", "user_id", name="comp_registrations_comp_user_key"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    competition_id: Mapped[int] = mapped_column(Integer, ForeignKey("competitions.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    team_id: Mapped[int] = mapped_column(Integer, ForeignKey("competition_teams.id", ondelete="CASCADE"), nullable=False)
+    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    team: Mapped[CompetitionTeam] = relationship("CompetitionTeam", back_populates="registrations")
+    user: Mapped[User] = relationship("User")
+
+
+class Match(Base):
+    """Match between two teams in a competition."""
+
+    __tablename__ = "matches"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    competition_id: Mapped[int] = mapped_column(Integer, ForeignKey("competitions.id", ondelete="CASCADE"), nullable=False)
+    round: Mapped[str] = mapped_column(String(16), nullable=False)
+    team_a_id: Mapped[int] = mapped_column(Integer, ForeignKey("competition_teams.id"), nullable=False)
+    team_b_id: Mapped[int] = mapped_column(Integer, ForeignKey("competition_teams.id"), nullable=False)
+    score_a: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    score_b: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    hashrate_a: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    hashrate_b: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    miners_a: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    miners_b: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="scheduled")
+    match_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    man_of_match_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=True)
+    man_of_match_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ai_recap: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    match_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default="{}")
+
+    competition: Mapped[Competition] = relationship("Competition", back_populates="matches")
+    team_a: Mapped[CompetitionTeam] = relationship("CompetitionTeam", foreign_keys=[team_a_id])
+    team_b: Mapped[CompetitionTeam] = relationship("CompetitionTeam", foreign_keys=[team_b_id])
+    man_of_match: Mapped[User | None] = relationship("User", foreign_keys=[man_of_match_user_id])
+
+
+class League(Base):
+    """League (quarterly season with promotion/relegation)."""
+
+    __tablename__ = "leagues"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    division: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    season: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
+    start_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    end_date: Mapped[Any] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    clubs: Mapped[list[LeagueClub]] = relationship("LeagueClub", back_populates="league", cascade="all, delete-orphan")
+
+
+class LeagueClub(Base):
+    """Club (cooperative) in a league."""
+
+    __tablename__ = "league_clubs"
+    __table_args__ = (
+        UniqueConstraint("league_id", "cooperative_id", name="league_clubs_league_coop_key"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    league_id: Mapped[int] = mapped_column(Integer, ForeignKey("leagues.id", ondelete="CASCADE"), nullable=False)
+    cooperative_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    played: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    won: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    drawn: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    lost: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    points: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    hashrate: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    is_promoted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_relegated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    league: Mapped[League] = relationship("League", back_populates="clubs")
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: Social & Cooperatives
+# ---------------------------------------------------------------------------
+
+
+class Cooperative(Base):
+    """Cooperative — small mining guilds (max 20 members)."""
+
+    __tablename__ = "cooperatives"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    motto: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    invite_code: Mapped[str] = mapped_column(String(8), unique=True, nullable=False)
+    owner_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    max_members: Mapped[int] = mapped_column(Integer, nullable=False, server_default="20")
+    combined_hashrate: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    weekly_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    best_combined_diff: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    blocks_found: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_shares_week: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    weekly_rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    members: Mapped[list[CooperativeMember]] = relationship(
+        "CooperativeMember", back_populates="cooperative", cascade="all, delete-orphan"
+    )
+    owner: Mapped[User] = relationship("User", foreign_keys=[owner_user_id])
+
+
+class CooperativeMember(Base):
+    """Cooperative membership — one user can only be in one cooperative."""
+
+    __tablename__ = "cooperative_members"
+    __table_args__ = (
+        UniqueConstraint("cooperative_id", "user_id", name="coop_members_coop_user_key"),
+        UniqueConstraint("user_id", name="coop_members_user_unique"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cooperative_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cooperatives.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="member")
+    hashrate: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    shares_today: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    is_online: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    cooperative: Mapped[Cooperative] = relationship("Cooperative", back_populates="members")
+    user: Mapped[User] = relationship("User")
+
+
+class UserActivity(Base):
+    """User activity log for personal feed."""
+
+    __tablename__ = "user_activity"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activity_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default="{}")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship("User")
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
 class Notification(Base):
     """Persisted user notifications."""
 
@@ -633,4 +896,87 @@ class Notification(Base):
     action_url: Mapped[str | None] = mapped_column(String(256), nullable=True)
     action_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     read: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    notification_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, server_default="{}")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Education
+# ---------------------------------------------------------------------------
+
+
+class EducationTrack(Base):
+    """Education track — groups related lessons."""
+
+    __tablename__ = "education_tracks"
+    __table_args__ = {"extend_existing": True}  # noqa: RUF012
+
+    id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    lesson_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    lessons: Mapped[list[EducationLesson]] = relationship(
+        "EducationLesson", back_populates="track", order_by="EducationLesson.order"
+    )
+
+
+class EducationLesson(Base):
+    """Education lesson — stores Markdown content with dynamic placeholders."""
+
+    __tablename__ = "education_lessons"
+    __table_args__ = (
+        UniqueConstraint("track_id", "order", name="uq_lesson_track_order"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    track_id: Mapped[str] = mapped_column(
+        String(10), ForeignKey("education_tracks.id", ondelete="CASCADE"), nullable=False
+    )
+    order: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    estimated_minutes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    track: Mapped[EducationTrack] = relationship("EducationTrack", back_populates="lessons")
+
+
+class UserLessonCompletion(Base):
+    """User lesson completion — UNIQUE(user_id, lesson_id) prevents duplicates."""
+
+    __tablename__ = "user_lesson_completions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "lesson_id", name="uq_user_lesson"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    track_id: Mapped[str] = mapped_column(String(10), ForeignKey("education_tracks.id"), nullable=False)
+    lesson_id: Mapped[str] = mapped_column(String(10), ForeignKey("education_lessons.id"), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UserTrackCompletion(Base):
+    """User track completion — UNIQUE(user_id, track_id) prevents duplicates."""
+
+    __tablename__ = "user_track_completions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "track_id", name="uq_user_track"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    track_id: Mapped[str] = mapped_column(String(10), ForeignKey("education_tracks.id"), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

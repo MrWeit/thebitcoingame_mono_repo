@@ -29,25 +29,23 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # CKPool mining engine (GPLv3 fork)
+  # CKPool mining engine (vanilla + signet patch for testing)
   ckpool:
     build:
       context: ./ckpool
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.vanilla
     container_name: tbg-ckpool
     depends_on:
       bitcoin-signet:
         condition: service_healthy
     ports:
       - "3333:3333"     # Stratum port
-      - "9100:9100"     # Prometheus metrics
     volumes:
       - ckpool-logs:/var/log/ckpool
       - ckpool-run:/var/run/ckpool
-      - ckpool-events:/tmp/ckpool
       - ./ckpool/config:/etc/ckpool:ro
     entrypoint: ["/bin/sh", "-c"]
-    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet.conf -s /var/run/ckpool -l 7"]
+    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet-vanilla.conf -s /var/run/ckpool -l 7"]
     restart: unless-stopped
 
   # Redis (event streams + pub/sub)
@@ -194,6 +192,24 @@ services:
       TBG_REDIS_URL: redis://redis:6379/0
       TBG_CONSUMER_NAME: api-worker-1
       TBG_WORKER_TIMEOUT_SECONDS: "600"
+    restart: unless-stopped
+
+  # CPU Miner (for testing — mines on ckpool stratum)
+  cpuminer:
+    build:
+      context: ./cpuminer
+      dockerfile: Dockerfile
+    container_name: tbg-cpuminer
+    depends_on:
+      - ckpool
+    command:
+      - --url=stratum+tcp://ckpool:3333
+      - --user=mfnNyPsinywVCqCr35215gviGo8cWGiDnb.worker1
+      - --pass=x
+      - --threads=1
+      - --algo=sha256d
+      - --retry-pause=5
+      - --debug
     restart: unless-stopped
 
 volumes:

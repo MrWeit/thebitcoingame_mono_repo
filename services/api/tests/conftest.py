@@ -95,7 +95,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
             # Truncate all user-related tables (CASCADE handles FK deps)
             await session.execute(text("TRUNCATE TABLE users CASCADE"))
             # Truncate mining data tables (may not depend on users via FK in all cases)
-            for table in ["game_sessions", "lottery_results", "lottery_draws", "notifications", "badge_stats", "streak_calendar", "user_gamification", "xp_ledger", "user_badges", "activity_feed", "upcoming_events", "hashrate_snapshots", "personal_bests", "user_daily_stats", "network_difficulty", "shares", "blocks"]:
+            for table in ["user_track_completions", "user_lesson_completions", "education_lessons", "education_tracks", "user_activity", "cooperative_members", "cooperatives", "league_clubs", "leagues", "matches", "competition_registrations", "competition_teams", "competitions", "country_rankings", "leaderboard_snapshots", "game_sessions", "lottery_results", "lottery_draws", "notifications", "badge_stats", "streak_calendar", "user_gamification", "xp_ledger", "user_badges", "activity_feed", "upcoming_events", "hashrate_snapshots", "personal_bests", "user_daily_stats", "network_difficulty", "shares", "blocks"]:
                 try:
                     await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))  # noqa: S608
                 except Exception:
@@ -115,7 +115,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
         pass  # Tables may not exist yet
 
     # Also flush mining-related Redis keys
-    for pattern in ["worker:*", "workers:*", "user_hashrate:*", "network:*", "dashboard:*", "game:*", "lottery:*"]:
+    for pattern in ["worker:*", "workers:*", "user_hashrate:*", "network:*", "dashboard:*", "game:*", "lottery:*", "leaderboard:*"]:
         keys = await redis.keys(pattern)
         if keys:
             await redis.delete(*keys)
