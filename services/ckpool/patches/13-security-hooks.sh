@@ -5,8 +5,30 @@
 # Hooks input_validation and rate_limit into stratifier.c at the connection,
 # authorization, and share submission points. Also wires event_ring and
 # memory_pool initialization into ckpool.c startup/shutdown.
+#
+# IMPORTANT: This patch runs AFTER patches 01-11, so TBG event emission
+# functions and variables (tbg_active, tbg_init_events, tbg_emit_*) already
+# exist in stratifier.c, and tbg_metrics_init already exists in ckpool.c.
+#
+# In vanilla ckpool, the client struct field is `client->address` (IP string).
+# There is NO `client->address_name` field.
 
 echo "=== Patch 13: Security Hooks (Phase 5) ==="
+
+# ─── Add includes to ckpool.c (for rate_limit_init/shutdown) ─────────
+echo "  Adding Phase 5 includes to ckpool.c..."
+if ! grep -q "rate_limit.h" "${MAIN}"; then
+    LINE=$(getline '#include "ckpool.h"' "${MAIN}")
+    if [ -n "${LINE}" ]; then
+        sedi "${LINE}a\\
+#include \"rate_limit.h\" /* TBG_P5 */" "${MAIN}"
+        echo "    rate_limit.h include added to ckpool.c"
+    else
+        echo "    WARNING: ckpool.h include not found in ckpool.c"
+    fi
+else
+    echo "    Already patched"
+fi
 
 # ─── Add includes to stratifier.c ────────────────────────────────────
 echo "  Adding Phase 5 includes to stratifier.c..."
@@ -31,24 +53,26 @@ else
 fi
 
 # ─── Add rate limit check on new connections ─────────────────────────
-# Hook into the connector's accept path (connector_recruit_client in ckpool.c)
+# Hook into the authorization path — after client->authorised is set.
+# Phase 1 already hooks here with tbg_emit_connect; we insert BEFORE
+# the auth hook so rate-limited clients never emit a connect event.
 echo "  Adding rate limit check on connections..."
 if ! grep -q "tbg_rate_limit_connect.*TBG_P5" "${STRAT}"; then
-    # Find the point after the client IP is set in parse_instance
-    LINE=$(getline 'client->address_name' "${STRAT}")
+    # Find the tbg_emit_connect hook added by Phase 1 patch 01
+    LINE=$(getline 'tbg_emit_connect.*/\* TBG' "${STRAT}")
     if [ -n "${LINE}" ]; then
-        LINE=$((LINE + 1))
-        sedi "${LINE}a\\
+        sedi "${LINE}i\\
 \\
-\t/* TBG_P5: Rate limit new connections */\\
-\tif (!tbg_rate_limit_connect(client->address_name)) { /* TBG_P5 */\\
-\t\tLOGINFO(\"Rate limited connection from %s\", client->address_name);\\
-\t\treturn;\\
-\t}" "${STRAT}"
+\t\t/* TBG_P5: Rate limit new connections */\\
+\t\tif (ret && !tbg_rate_limit_connect(client->address)) { /* TBG_P5 */\\
+\t\t\tLOGINFO(\"Rate limited connection from %s\", client->address);\\
+\t\t\tclient->dropped = true;\\
+\t\t\treturn;\\
+\t\t}" "${STRAT}"
         echo "    Connection rate limit hook added"
         apply_hook
     else
-        echo "    WARNING: client->address_name not found in stratifier.c"
+        echo "    WARNING: tbg_emit_connect hook not found in stratifier.c"
     fi
 else
     echo "    Already patched"
@@ -56,17 +80,18 @@ else
 fi
 
 # ─── Add rate limit disconnect tracking ──────────────────────────────
+# Hook into the same disconnect path as Phase 1 (before __del_client).
 echo "  Adding rate limit disconnect tracking..."
 if ! grep -q "tbg_rate_limit_disconnect.*TBG_P5" "${STRAT}"; then
-    # Find the client_disconnect/drop_client function
-    LINE=$(getline 'drop_client' "${STRAT}")
+    # Find Phase 1's disconnect hook (tbg_emit_disconnect)
+    LINE=$(getline 'tbg_emit_disconnect.*/\* TBG' "${STRAT}")
     if [ -n "${LINE}" ]; then
         sedi "${LINE}a\\
-\ttbg_rate_limit_disconnect(client->address_name); /* TBG_P5 */" "${STRAT}"
+\ttbg_rate_limit_disconnect(client->address); /* TBG_P5 */" "${STRAT}"
         echo "    Disconnect tracking hook added"
         apply_hook
     else
-        echo "    WARNING: drop_client not found"
+        echo "    WARNING: tbg_emit_disconnect hook not found"
     fi
 else
     echo "    Already patched"
@@ -76,26 +101,24 @@ fi
 # ─── Add input validation on mining.authorize ────────────────────────
 echo "  Adding input validation on authorize..."
 if ! grep -q "tbg_validate_btc_address.*TBG_P5" "${STRAT}"; then
-    LINE=$(getline 'client_auth' "${STRAT}")
+    # Find the tbg_emit_connect hook (which is inside client_auth after auth succeeds)
+    # and insert address validation BEFORE it
+    LINE=$(getline 'tbg_rate_limit_connect.*/\* TBG_P5' "${STRAT}")
+    if [ -z "${LINE}" ]; then
+        LINE=$(getline 'tbg_emit_connect.*/\* TBG' "${STRAT}")
+    fi
     if [ -n "${LINE}" ]; then
-        # Find the point where the address is extracted
-        ADDR_LINE=$(getline_nth 'address' "${STRAT}" "$(grep -n 'address' "${STRAT}" | awk -v start="${LINE}" -F: '$1 > start' | head -1 | cut -d: -f1)")
-        if [ -n "${ADDR_LINE}" ] && [ "${ADDR_LINE}" -gt "${LINE}" ]; then
-            sedi "${ADDR_LINE}a\\
+        sedi "${LINE}i\\
 \\
-\t/* TBG_P5: Validate miner-supplied address */\\
-\tif (address && !tbg_validate_btc_address(address)) { /* TBG_P5 */\\
-\t\ttbg_log_validation_failure(client->address_name, \"btc_address\", address, \"invalid format\");\\
-\t\tLOGWARNING(\"Invalid BTC address from %s: %.32s\", client->address_name, address);\\
-\t}" "${STRAT}"
-            echo "    Address validation hook added"
-            apply_hook
-        else
-            echo "    INFO: address extraction line not found, skipping address validation hook"
-            apply_hook
-        fi
+\t\t/* TBG_P5: Validate miner-supplied address */\\
+\t\tif (user && user->username && !tbg_validate_btc_address(user->username)) { /* TBG_P5 */\\
+\t\t\ttbg_log_validation_failure(client->address, \"btc_address\", user->username, \"invalid format\");\\
+\t\t\tLOGWARNING(\"Invalid BTC address from %s: %.32s\", client->address, user->username);\\
+\t\t}" "${STRAT}"
+        echo "    Address validation hook added"
+        apply_hook
     else
-        echo "    WARNING: client_auth not found"
+        echo "    INFO: auth hook point not found, skipping address validation"
         apply_hook
     fi
 else
@@ -106,19 +129,19 @@ fi
 # ─── Add input validation on mining.submit (worker name) ─────────────
 echo "  Adding worker name validation on submit..."
 if ! grep -q "tbg_validate_worker_name.*TBG_P5" "${STRAT}"; then
-    # Find the submit_share function
-    LINE=$(getline 'parse_method.*mining.submit' "${STRAT}")
+    # Find the share emission hook from Phase 1
+    LINE=$(getline 'tbg_emit_share.*/\* TBG' "${STRAT}")
     if [ -n "${LINE}" ]; then
-        sedi "${LINE}a\\
+        sedi "${LINE}i\\
 \\
-\t/* TBG_P5: Validate worker name */\\
-\tif (workername && !tbg_validate_worker_name(workername)) { /* TBG_P5 */\\
-\t\ttbg_log_validation_failure(client->address_name, \"worker_name\", workername, \"invalid chars\");\\
-\t}" "${STRAT}"
+\t\t/* TBG_P5: Validate worker name */\\
+\t\tif (client->workername && !tbg_validate_worker_name(client->workername)) { /* TBG_P5 */\\
+\t\t\ttbg_log_validation_failure(client->address, \"worker_name\", client->workername, \"invalid chars\");\\
+\t\t}" "${STRAT}"
         echo "    Worker name validation hook added"
         apply_hook
     else
-        echo "    INFO: mining.submit parse not found, skipping worker validation"
+        echo "    INFO: tbg_emit_share not found, skipping worker validation"
         apply_hook
     fi
 else
@@ -128,20 +151,20 @@ fi
 
 # ─── Add per-connection rate limit check on share submission ─────────
 echo "  Adding per-connection rate limit on share submit..."
-if ! grep -q "tbg_rate_limit_check_conn.*RATE_SUBMIT.*TBG_P5" "${STRAT}"; then
-    LINE=$(getline 'parse_method.*mining.submit' "${STRAT}")
+if ! grep -q "tbg_rate_limit_is_banned.*RATE_SUBMIT.*TBG_P5" "${STRAT}"; then
+    # Insert before the Phase 1 share emission hook
+    LINE=$(getline 'tbg_emit_share.*/\* TBG' "${STRAT}")
     if [ -n "${LINE}" ]; then
-        sedi "${LINE}a\\
+        sedi "${LINE}i\\
 \\
-\t/* TBG_P5: Per-connection submit rate limit */\\
-\tif (!tbg_rate_limit_check_conn(&client->rate_state, RATE_SUBMIT)) { /* TBG_P5 */\\
-\t\tLOGINFO(\"Share submit rate limit exceeded for %s\", client->address_name);\\
-\t\treturn;\\
-\t}" "${STRAT}"
+\t\t/* TBG_P5: Check if IP is soft-banned from share flooding */\\
+\t\tif (tbg_rate_limit_is_banned(client->address)) { /* RATE_SUBMIT TBG_P5 */\\
+\t\t\tLOGINFO(\"Share rejected: IP soft-banned %s\", client->address);\\
+\t\t}" "${STRAT}"
         echo "    Submit rate limit hook added"
         apply_hook
     else
-        echo "    INFO: mining.submit not found"
+        echo "    INFO: tbg_emit_share not found"
         apply_hook
     fi
 else
@@ -149,23 +172,44 @@ else
     apply_hook
 fi
 
-# ─── Add JSON payload validation ─────────────────────────────────────
+# ─── Add JSON payload size validation ─────────────────────────────────
+# Note: In vanilla ckpool, smsg_t contains json_t *json_msg (already parsed
+# by jansson) and int64_t client_id — there is no raw buffer field.
+# We validate the serialized size of the JSON object as a safety measure.
 echo "  Adding JSON payload size validation..."
 if ! grep -q "tbg_validate_json_payload.*TBG_P5" "${STRAT}"; then
-    # Find the point where the raw JSON buffer is received
-    LINE=$(getline 'parse_client_msg' "${STRAT}")
+    LINE=$(getline 'parse_instance_msg' "${STRAT}")
     if [ -n "${LINE}" ]; then
-        sedi "${LINE}a\\
-\\
-\t/* TBG_P5: Validate JSON payload size and nesting */\\
-\tif (buf && !tbg_validate_json_payload(buf, strlen(buf), 65536)) { /* TBG_P5 */\\
-\t\ttbg_log_validation_failure(client->address_name, \"json_payload\", \"(oversized)\", \"exceeds max size or nesting\");\\
-\t\treturn;\\
-\t}" "${STRAT}"
-        echo "    JSON payload validation hook added"
-        apply_hook
+        # Find the opening brace of this function (next line with just {)
+        BRACE=$(awk -v start="${LINE}" 'NR > start && /^{/ { print NR; exit }' "${STRAT}")
+        if [ -n "${BRACE}" ]; then
+            # Write replacement via temp file to avoid escaping issues
+            cat > /tmp/tbg_json_check.c << 'JSONEOF'
+
+	/* TBG_P5: Validate JSON payload size */
+	{
+		char *json_str = json_dumps(msg->json_msg, JSON_COMPACT);
+		if (json_str) {
+			size_t jlen = strlen(json_str);
+			if (!tbg_validate_json_payload(json_str, jlen, 65536)) { /* TBG_P5 */
+				tbg_log_validation_failure(client->address, "json_payload", "(oversized)", "exceeds max size or nesting");
+				free(json_str);
+				return;
+			}
+			free(json_str);
+		}
+	}
+JSONEOF
+            sedi "${BRACE}r /tmp/tbg_json_check.c" "${STRAT}"
+            rm -f /tmp/tbg_json_check.c
+            echo "    JSON payload validation hook added"
+            apply_hook
+        else
+            echo "    INFO: Could not find function body for parse_instance_msg"
+            apply_hook
+        fi
     else
-        echo "    INFO: parse_client_msg not found"
+        echo "    INFO: parse_instance_msg not found"
         apply_hook
     fi
 else
@@ -174,17 +218,24 @@ else
 fi
 
 # ─── Add initialization calls to ckpool.c ────────────────────────────
+# Earlier patches only add config parsing to ckpool.c, not code in main().
+# We find main()'s opening brace and insert early in the function body.
 echo "  Adding Phase 5 initialization to ckpool.c..."
 if ! grep -q "tbg_rate_limit_init.*TBG_P5" "${MAIN}"; then
-    LINE=$(getline 'tbg_metrics_init\|main.*argc' "${MAIN}")
-    if [ -n "${LINE}" ]; then
-        sedi "${LINE}a\\
+    MAIN_LINE=$(getline 'int main(int argc' "${MAIN}")
+    if [ -n "${MAIN_LINE}" ]; then
+        BRACE=$(awk -v start="${MAIN_LINE}" 'NR > start && /^{/ { print NR; exit }' "${MAIN}")
+        if [ -n "${BRACE}" ]; then
+            sedi "${BRACE}a\\
 \\
 \t/* TBG_P5: Initialize security and performance modules */\\
 \ttbg_rate_limit_init(NULL); /* TBG_P5: Use default rate limits */\\
 \tLOGNOTICE(\"TBG Phase 5: Security modules initialized\"); /* TBG_P5 */" "${MAIN}"
-        echo "    Initialization hooks added to ckpool.c"
-        apply_hook
+            echo "    Initialization hooks added to ckpool.c (after main brace at ${BRACE})"
+            apply_hook
+        else
+            echo "    WARNING: Could not find opening brace for main()"
+        fi
     else
         echo "    WARNING: main function not found in ckpool.c"
     fi
@@ -194,16 +245,29 @@ else
 fi
 
 # ─── Add shutdown calls to ckpool.c ──────────────────────────────────
+# Insert BEFORE the clean_up(&ckp) CALL (not the function definition).
+# The call is `clean_up(&ckp);` inside main(), distinct from the
+# function definition `static void clean_up(ckpool_t *ckp)`.
 echo "  Adding Phase 5 shutdown to ckpool.c..."
 if ! grep -q "tbg_rate_limit_shutdown.*TBG_P5" "${MAIN}"; then
-    LINE=$(getline 'clean_up\|exit.*EXIT_SUCCESS\|return 0' "${MAIN}")
+    LINE=$(getline 'clean_up(&ckp)' "${MAIN}")
     if [ -n "${LINE}" ]; then
         sedi "${LINE}i\\
 \ttbg_rate_limit_shutdown(); /* TBG_P5: Cleanup rate limiter */" "${MAIN}"
         echo "    Shutdown hooks added to ckpool.c"
         apply_hook
     else
-        echo "    INFO: cleanup point not found in ckpool.c"
+        echo "    INFO: clean_up(&ckp) call not found in ckpool.c"
+        # Fallback: find return 0 at end of main
+        LINE=$(grep -n 'return 0;' "${MAIN}" | tail -1 | cut -d: -f1)
+        if [ -n "${LINE}" ]; then
+            sedi "${LINE}i\\
+\ttbg_rate_limit_shutdown(); /* TBG_P5: Cleanup rate limiter */" "${MAIN}"
+            echo "    Shutdown hooks added (via return 0 fallback)"
+            apply_hook
+        else
+            echo "    WARNING: No shutdown insertion point found"
+        fi
     fi
 else
     echo "    Already patched"

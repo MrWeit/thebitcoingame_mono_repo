@@ -16,12 +16,21 @@ fi
 # ─── Add Phase 5 source files to ckpool_SOURCES ──────────────────────
 echo "  Patching Makefile.am (Phase 5 sources)..."
 if ! grep -q "input_validation" "${MAKEFILE_AM}"; then
-    # Append after the Phase 3 TBG files (tbg_vardiff.h)
-    sedi 's/tbg_vardiff\.c tbg_vardiff\.h$/tbg_vardiff.c tbg_vardiff.h \\\
+    # Append after the last TBG file in ckpool_SOURCES.
+    # Patch 11 may have added relay files, so try relay_client first, then vardiff.
+    if grep -q "tbg_relay_client" "${MAKEFILE_AM}"; then
+        sedi 's/tbg_relay_client\.c tbg_relay_client\.h$/tbg_relay_client.c tbg_relay_client.h \\\
 \t\t input_validation.c input_validation.h \\\
 \t\t rate_limit.c rate_limit.h \\\
 \t\t event_ring.c event_ring.h \\\
 \t\t memory_pool.c memory_pool.h/' "${MAKEFILE_AM}"
+    else
+        sedi 's/tbg_vardiff\.c tbg_vardiff\.h$/tbg_vardiff.c tbg_vardiff.h \\\
+\t\t input_validation.c input_validation.h \\\
+\t\t rate_limit.c rate_limit.h \\\
+\t\t event_ring.c event_ring.h \\\
+\t\t memory_pool.c memory_pool.h/' "${MAKEFILE_AM}"
+    fi
     echo "    Phase 5 source files added to ckpool_SOURCES"
     apply_hook
 else

@@ -139,6 +139,63 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     restart: unless-stopped
 
+  # Backend API (FastAPI)
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: tbg-api
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      TBG_DATABASE_URL: postgresql+asyncpg://tbg:tbgdev2026@timescaledb:5432/thebitcoingame
+      TBG_REDIS_URL: redis://redis:6379/0
+      TBG_DEBUG: "true"
+      TBG_ENVIRONMENT: development
+      TBG_LOG_LEVEL: DEBUG
+      TBG_CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+      TBG_JWT_PRIVATE_KEY_PATH: /app/keys/jwt_private.pem
+      TBG_JWT_PUBLIC_KEY_PATH: /app/keys/jwt_public.pem
+      TBG_BTC_NETWORK: signet
+      TBG_FRONTEND_BASE_URL: http://localhost:5173
+      TBG_EMAIL_PROVIDER: smtp
+      TBG_SMTP_HOST: localhost
+      TBG_SMTP_PORT: "1025"
+    volumes:
+      - ./api/src:/app/src:ro
+      - ./api/keys:/app/keys:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8000/health'); r.raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Event Consumer (arq worker — reads mining events from Redis Streams)
+  event-consumer:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: tbg-event-consumer
+    command: ["python", "-m", "tbg.workers.event_consumer_runner"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TBG_DATABASE_URL: postgresql+asyncpg://tbg:tbgdev2026@timescaledb:5432/thebitcoingame
+      TBG_REDIS_URL: redis://redis:6379/0
+      TBG_CONSUMER_NAME: api-worker-1
+      TBG_WORKER_TIMEOUT_SECONDS: "600"
+    restart: unless-stopped
+
 volumes:
   bitcoin-signet-data:
   ckpool-logs:

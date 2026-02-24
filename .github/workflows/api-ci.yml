@@ -1,0 +1,88 @@
+name: API CI — Lint, Type-Check, Test
+
+on:
+  push:
+    paths:
+      - 'services/api/**'
+  pull_request:
+    paths:
+      - 'services/api/**'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        working-directory: services/api
+        run: pip install -e ".[dev]"
+      - name: Ruff lint
+        working-directory: services/api
+        run: ruff check src/ tests/
+      - name: Ruff format check
+        working-directory: services/api
+        run: ruff format --check src/ tests/
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        working-directory: services/api
+        run: pip install -e ".[dev]"
+      - name: mypy strict
+        working-directory: services/api
+        run: mypy src/tbg/ --strict
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: tbg
+          POSTGRES_PASSWORD: tbgdev2026
+          POSTGRES_DB: thebitcoingame_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        working-directory: services/api
+        run: pip install -e ".[dev]"
+      - name: Run Alembic migrations
+        working-directory: services/api
+        env:
+          TBG_DATABASE_URL: postgresql+asyncpg://tbg:tbgdev2026@localhost:5432/thebitcoingame_test
+          TBG_REDIS_URL: redis://localhost:6379/0
+        run: alembic upgrade head
+      - name: Run tests
+        working-directory: services/api
+        env:
+          TBG_DATABASE_URL: postgresql+asyncpg://tbg:tbgdev2026@localhost:5432/thebitcoingame_test
+          TBG_REDIS_URL: redis://localhost:6379/0
+          TBG_ENVIRONMENT: test
+        run: pytest --cov-fail-under=80

@@ -71,15 +71,30 @@ static char tbg_region_tag[32] = \"default\"; /* TBG: region for event tagging *
     fi
 
     # Modify tbg_emit() to inject region into JSON
-    # Replace the sendto line with region-injecting version
-    if grep -q 'sendto(tbg_event_fd, buf, len, MSG_DONTWAIT' "${STRAT}"; then
-        sedi '/sendto(tbg_event_fd, buf, len, MSG_DONTWAIT/{
-s|sendto(tbg_event_fd, buf, len, MSG_DONTWAIT,|/* TBG: inject region tag into event JSON */\
-\tchar rbuf[4096];\
-\tint rlen = snprintf(rbuf, sizeof(rbuf), "{\"region\":\"%s\",%s", tbg_region_tag, buf + 1);\
-\tif (rlen > 0 \&\& rlen < (int)sizeof(rbuf))\
-\t\tsendto(tbg_event_fd, rbuf, rlen, MSG_DONTWAIT,|
-}' "${STRAT}"
+    # Replace the sendto call with region-injecting version.
+    # We use a temp file + line-number sed to avoid escaping issues with
+    # C string literals containing backslash-quotes.
+    SENDTO_LINE=$(getline 'sendto(tbg_event_fd, buf, len, MSG_DONTWAIT' "${STRAT}")
+    if [ -n "${SENDTO_LINE}" ]; then
+        # The sendto spans two lines:
+        #   sendto(tbg_event_fd, buf, len, MSG_DONTWAIT,
+        #          (struct sockaddr *)&tbg_event_addr, sizeof(tbg_event_addr));
+        SENDTO_END=$((SENDTO_LINE + 1))
+
+        # Write replacement C code to temp file (heredoc preserves quotes)
+        cat > /tmp/tbg_region_inject.c << 'REGIONEOF'
+	/* TBG: inject region tag into event JSON */
+	char rbuf[4096];
+	int rlen = snprintf(rbuf, sizeof(rbuf), "{\"region\":\"%s\",%s", tbg_region_tag, buf + 1);
+	if (rlen > 0 && rlen < (int)sizeof(rbuf))
+		sendto(tbg_event_fd, rbuf, rlen, MSG_DONTWAIT,
+		       (struct sockaddr *)&tbg_event_addr, sizeof(tbg_event_addr));
+REGIONEOF
+
+        # Delete the original 2-line sendto, then insert replacement
+        sedi "${SENDTO_LINE},${SENDTO_END}d" "${STRAT}"
+        sedi "$((SENDTO_LINE - 1))r /tmp/tbg_region_inject.c" "${STRAT}"
+        rm -f /tmp/tbg_region_inject.c
         echo "    Region injection applied to tbg_emit()"
     else
         echo "    WARNING: sendto pattern not found in tbg_emit()"

@@ -11,7 +11,7 @@
 
 This document provides a high-level overview of the Backend Service development roadmap for The Bitcoin Game. The roadmap is organized into eleven phases, progressing from project scaffolding through gamification, competitions, and education to a full production deployment.
 
-The Backend Service sits between the ckpool Event Collector (which feeds mining events into Redis Streams + TimescaleDB) and the React frontend. It provides a FastAPI-based REST/WebSocket API that translates raw mining data into the gamified experience: authentication via Bitcoin message signing, real-time dashboard data, badges, XP, streaks, leaderboards, competitions, and education tracking.
+The Backend Service sits between the ckpool Event Collector (which feeds mining events into Redis Streams + TimescaleDB) and the React frontend. It provides a FastAPI-based REST/WebSocket API that translates raw mining data into the gamified experience: dual authentication (Bitcoin wallet message signing + email/password), transactional email service, real-time dashboard data, badges, XP, streaks, leaderboards, competitions, and education tracking.
 
 For the mining engine roadmap, see the [CKPool Service Roadmap](../../ckpool-service/roadmap/00-overview.md).
 
@@ -29,7 +29,7 @@ gantt
     Project scaffolding & CI             :p0, 2026-03-01, 14d
 
     section Phase 1: Authentication
-    Bitcoin auth & user management       :p1, 2026-03-15, 21d
+    Dual auth & email service & users    :p1, 2026-03-15, 28d
 
     section Phase 2: Mining Data
     Mining data API & hashrate engine    :p2, 2026-04-05, 21d

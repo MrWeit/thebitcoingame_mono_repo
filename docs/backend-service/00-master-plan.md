@@ -158,7 +158,7 @@ graph LR
     subgraph FastAPI["API Server (:8000)"]
         direction TB
         MW["Middleware Stack<br/>CORS, Rate Limit, Auth"]
-        R_AUTH["Router: /auth<br/>Challenge, Verify, Refresh"]
+        R_AUTH["Router: /auth<br/>Challenge, Verify, Register,<br/>Login, Refresh, Password Reset"]
         R_MINING["Router: /mining<br/>Dashboard, Workers, Shares"]
         R_GAME["Router: /gamification<br/>Badges, XP, Streaks, Level"]
         R_LB["Router: /leaderboard<br/>Weekly, Monthly, All-time"]
@@ -244,7 +244,7 @@ backend/
 │   │   └── deps.py            # Dependency injection
 │   ├── core/
 │   │   ├── config.py          # Pydantic Settings
-│   │   ├── security.py        # JWT, BTC signing, API keys
+│   │   ├── security.py        # JWT, BTC signing, password hashing, API keys
 │   │   ├── database.py        # Async engine + session
 │   │   └── redis.py           # Redis client
 │   ├── models/                # SQLAlchemy ORM models
@@ -579,6 +579,8 @@ erDiagram
     users ||--o{ blocks : "finds"
     users ||--o{ weekly_best_diff : "tracks"
     users ||--o{ refresh_tokens : "authenticates"
+    users ||--o{ email_verification_tokens : "verifies"
+    users ||--o{ password_reset_tokens : "resets"
     users ||--o{ api_keys : "manages"
     users ||--|| user_settings : "configures"
     users ||--|| user_gamification : "progresses"
@@ -1458,6 +1460,12 @@ GET    /api/v1/leaderboard/neighbors   # Users around current user's rank
 }
 ```
 
+#### Users (wallet management)
+
+```
+PATCH  /api/v1/users/me/wallet         # Update BTC wallet address
+```
+
 ### Error Response Format
 
 All errors follow a consistent format:
@@ -1824,6 +1832,7 @@ Delivers notifications through multiple channels.
 | WebSocket push | Redis PUBLISH | Real-time in-app (primary) |
 | In-app persist | TimescaleDB INSERT | Notification history |
 | Email (optional) | SMTP / Resend API | Block found, weekly digest |
+| Email (transactional) | SMTP / Resend / SES | Verification, password reset, welcome |
 
 ### scheduler (cron)
 
@@ -1959,7 +1968,8 @@ async def test_auth_challenge_and_verify(client: AsyncClient, db: AsyncSession):
 ```mermaid
 graph LR
     subgraph Auth["Authentication Methods"]
-        BTC["Bitcoin Message Signing<br/>Primary: all users"]
+        BTC["Bitcoin Message Signing<br/>Primary: wallet users"]
+        EMAIL["Email + Password<br/>Registration + Login"]
         JWT["JWT RS256<br/>Access tokens (15min)"]
         APIKEY["API Keys<br/>Third-party integrations"]
     end
@@ -1973,10 +1983,12 @@ graph LR
     subgraph Storage["Secure Storage"]
         RS256["RS256 Key Pair<br/>Asymmetric JWT signing"]
         ARGON["Argon2<br/>API key hashing"]
+        ARGON_PW["Argon2id<br/>Password hashing"]
         SHA["SHA-256<br/>Refresh token hashing"]
     end
 
     BTC --> JWT
+    EMAIL --> JWT
     JWT --> RATE
     APIKEY --> RATE
     RATE --> PYDANTIC
@@ -1987,7 +1999,7 @@ graph LR
 
 | Threat | Mitigation |
 |---|---|
-| **Password theft** | No passwords. Bitcoin message signing only. |
+| **Password theft** | Passwords hashed with argon2id (time_cost=3, memory_cost=65536). Bitcoin signing also available. |
 | **Token theft** | Short-lived JWT (15min). Refresh tokens rotated on use. |
 | **Replay attacks** | Challenge nonces are single-use, expire in 5 minutes. |
 | **JWT forgery** | RS256 asymmetric signing. Public key verifies, private key signs. |
@@ -1999,6 +2011,9 @@ graph LR
 | **DDoS** | Rate limiting + Cloudflare in front of API. |
 | **Data leakage** | Privacy settings control profile visibility. No email required. |
 | **Brute force** | Exponential backoff on failed auth attempts. |
+| **Email enumeration** | Forgot-password always returns 200 regardless of email existence. |
+| **Password brute force** | Account lockout after 10 failed attempts (15-min cooldown). Rate limit 5/min on login. |
+| **Email verification bypass** | Users can mine before verification but cannot change email or access sensitive settings. |
 | **Privilege escalation** | Role-based permissions. Admin routes require admin flag. |
 
 ### Rate Limits
@@ -2012,6 +2027,10 @@ graph LR
 | Leaderboard reads | 20/min | 60/min |
 | WebSocket connect | 5/min | 10/min |
 | API key operations | 10/min | 20/min |
+| Auth register | 3/min | 10/min |
+| Auth login | 5/min | 20/min |
+| Auth forgot-password | 3/min | 5/min |
+| Email sending | 5/hour per address | — |
 | Admin operations | 30/min | — |
 
 ### JWT Token Structure
@@ -2119,12 +2138,29 @@ class Settings(BaseSettings):
     STREAK_DEADLINE_HOUR: int = 0
     STREAK_MIN_SHARES: int = 1             # Minimum shares per week to keep streak
 
+    # ── Email Service ──
+    EMAIL_PROVIDER: str = "smtp"                    # smtp, resend, ses
+    EMAIL_SMTP_HOST: str = ""
+    EMAIL_SMTP_PORT: int = 587
+    EMAIL_SMTP_USER: str = ""
+    EMAIL_SMTP_PASSWORD: str = ""
+    EMAIL_FROM_ADDRESS: str = "noreply@thebitcoingame.com"
+    EMAIL_FROM_NAME: str = "The Bitcoin Game"
+    EMAIL_VERIFICATION_TOKEN_TTL_HOURS: int = 24
+    EMAIL_PASSWORD_RESET_TOKEN_TTL_MINUTES: int = 60
+    RESEND_API_KEY: str = ""                        # If using Resend provider
+
+    # ── Password Policy ──
+    PASSWORD_MIN_LENGTH: int = 8
+    PASSWORD_REQUIRE_UPPERCASE: bool = True
+    PASSWORD_REQUIRE_LOWERCASE: bool = True
+    PASSWORD_REQUIRE_DIGIT: bool = True
+    PASSWORD_MAX_LOGIN_ATTEMPTS: int = 10
+    PASSWORD_LOCKOUT_MINUTES: int = 15
+
     # ── Notifications ──
     NOTIFICATION_MAX_PER_USER: int = 100   # Max stored notifications
     EMAIL_ENABLED: bool = False
-    EMAIL_SMTP_HOST: str = ""
-    EMAIL_SMTP_PORT: int = 587
-    EMAIL_FROM: str = "noreply@thebitcoingame.com"
 
     # ── WebSocket ──
     WS_HEARTBEAT_INTERVAL: int = 30
@@ -2207,10 +2243,13 @@ gantt
 
     section Phase 1: Auth & Users
     Bitcoin message signing       :p1a, 2026-03-10, 7d
+    Email + password auth         :p1a2, 2026-03-10, 7d
     JWT RS256 token flow          :p1b, 2026-03-10, 5d
+    Email service integration     :p1b2, 2026-03-17, 5d
     User CRUD + settings          :p1c, 2026-03-17, 5d
-    API key management            :p1d, 2026-03-17, 5d
-    Rate limiting middleware      :p1e, 2026-03-22, 3d
+    API key management            :p1d, 2026-03-22, 5d
+    Wallet management             :p1d2, 2026-03-22, 3d
+    Rate limiting middleware      :p1e, 2026-03-27, 3d
 
     section Phase 2: Mining API
     Dashboard stats endpoint      :p2a, 2026-03-25, 5d
@@ -2275,7 +2314,7 @@ gantt
 | Phase | Name | Duration | Key Deliverables |
 |---|---|---|---|
 | 0 | Foundation | 1.5 weeks | Project scaffold, Alembic migrations, Docker Compose, CI/CD |
-| 1 | Auth & Users | 2 weeks | Bitcoin signing auth, JWT RS256, user CRUD, API keys, rate limiting |
+| 1 | Auth & Users | 3 weeks | Dual auth (Bitcoin signing + email/password), JWT RS256, email service, user CRUD, API keys, wallet management |
 | 2 | Mining API | 2 weeks | All mining endpoints (dashboard, workers, shares, hashrate, blocks) |
 | 3 | WebSocket | 1.5 weeks | Connection manager, channel multiplexing, Redis bridge, live feed |
 | 4 | Event Consumer | 1.5 weeks | Redis Stream consumer, event dispatching, worker status tracking |
@@ -2286,7 +2325,7 @@ gantt
 | 9 | Frontend Integration | 3 weeks | TanStack Query hooks, WebSocket client, mock data replacement, E2E tests |
 | 10 | Production | 3 weeks | Security audit, performance, monitoring, staging, production deploy |
 
-**Total estimated duration: ~24 weeks (6 months)**
+**Total estimated duration: ~25 weeks (6 months)**
 
 ### Phase Dependencies
 
@@ -2314,7 +2353,6 @@ graph LR
 | Lightning Betting | Regulatory complexity | Post-launch evaluation |
 | Decentralized Mining (TBG Proxy) | Requires CKPool service completion first | Future |
 | Mobile App | React dashboard is responsive; native app is future | Post-launch |
-| Email notifications | Optional; WebSocket + in-app is primary | Phase 8 (basic), post-launch (rich) |
 
 ---
 
