@@ -1,51 +1,67 @@
 services:
-  # Bitcoin Core signet node (lightweight test network, ~500MB)
-  bitcoin-signet:
+  # Bitcoin Core regtest node (local test network — real block finding)
+  bitcoin-regtest:
     image: lncm/bitcoind:v27.0
-    container_name: tbg-bitcoin-signet
+    container_name: tbg-bitcoin-regtest
     command:
-      - -signet
+      - -regtest
       - -server=1
       - -rpcuser=tbg
       - -rpcpassword=tbgdev2026
       - -rpcallowip=0.0.0.0/0
       - -rpcbind=0.0.0.0
-      - -rpcport=38332
+      - -rpcport=18443
       - -zmqpubhashblock=tcp://0.0.0.0:28332
       - -zmqpubrawtx=tcp://0.0.0.0:28333
       - -txindex=1
       - -fallbackfee=0.00001
       - -dbcache=256
     ports:
-      - "38332:38332"   # Signet RPC
+      - "18443:18443"   # Regtest RPC
       - "28332:28332"   # ZMQ hashblock
     volumes:
-      - bitcoin-signet-data:/home/bitcoin/.bitcoin
+      - bitcoin-regtest-data:/home/bitcoin/.bitcoin
     healthcheck:
-      test: ["CMD", "bitcoin-cli", "-signet", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=38332", "getblockchaininfo"]
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=tbg", "-rpcpassword=tbgdev2026", "-rpcport=18443", "getblockchaininfo"]
       interval: 10s
       timeout: 5s
       retries: 60
       start_period: 30s
     restart: unless-stopped
 
-  # CKPool mining engine (vanilla + signet patch for testing)
+  # Regtest bootstrap (creates wallet + mines 101 maturity blocks, then exits)
+  regtest-init:
+    image: lncm/bitcoind:v27.0
+    container_name: tbg-regtest-init
+    depends_on:
+      bitcoin-regtest:
+        condition: service_healthy
+    volumes:
+      - ./scripts/regtest-init.sh:/regtest-init.sh:ro
+    entrypoint: ["/bin/sh", "/regtest-init.sh"]
+    restart: "no"
+
+  # CKPool mining engine (GPLv3 fork with TBG patches)
   ckpool:
     build:
       context: ./ckpool
-      dockerfile: Dockerfile.vanilla
+      dockerfile: Dockerfile
     container_name: tbg-ckpool
     depends_on:
-      bitcoin-signet:
+      bitcoin-regtest:
         condition: service_healthy
+      regtest-init:
+        condition: service_completed_successfully
     ports:
       - "3333:3333"     # Stratum port
+      - "9100:9100"     # Prometheus metrics
     volumes:
       - ckpool-logs:/var/log/ckpool
       - ckpool-run:/var/run/ckpool
+      - ckpool-events:/tmp/ckpool
       - ./ckpool/config:/etc/ckpool:ro
     entrypoint: ["/bin/sh", "-c"]
-    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-signet-vanilla.conf -s /var/run/ckpool -l 7"]
+    command: ["rm -f /var/run/ckpool/main.pid && exec /opt/ckpool/bin/ckpool -c /etc/ckpool/ckpool-regtest.conf -s /var/run/ckpool -l 7"]
     restart: unless-stopped
 
   # Redis (event streams + pub/sub)
@@ -159,11 +175,13 @@ services:
       TBG_CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
       TBG_JWT_PRIVATE_KEY_PATH: /app/keys/jwt_private.pem
       TBG_JWT_PUBLIC_KEY_PATH: /app/keys/jwt_public.pem
-      TBG_BTC_NETWORK: signet
+      TBG_BTC_NETWORK: regtest
       TBG_FRONTEND_BASE_URL: http://localhost:5173
       TBG_EMAIL_PROVIDER: smtp
       TBG_SMTP_HOST: localhost
       TBG_SMTP_PORT: "1025"
+      TBG_RATE_LIMIT_REQUESTS: "1000"
+      TBG_RATE_LIMIT_WINDOW_SECONDS: "60"
     volumes:
       - ./api/src:/app/src:ro
       - ./api/keys:/app/keys:ro
@@ -194,6 +212,24 @@ services:
       TBG_WORKER_TIMEOUT_SECONDS: "600"
     restart: unless-stopped
 
+  # Gamification Worker (badges, XP, streaks — reads mining events from Redis Streams)
+  gamification-worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: tbg-gamification-worker
+    command: ["python", "-m", "tbg.workers.gamification_runner"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TBG_DATABASE_URL: postgresql+asyncpg://tbg:tbgdev2026@timescaledb:5432/thebitcoingame
+      TBG_REDIS_URL: redis://redis:6379/0
+      TBG_GAMIFICATION_CONSUMER: gam-worker-1
+    restart: unless-stopped
+
   # CPU Miner (for testing — mines on ckpool stratum)
   cpuminer:
     build:
@@ -213,7 +249,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  bitcoin-signet-data:
+  bitcoin-regtest-data:
   ckpool-logs:
   ckpool-run:
   ckpool-events:

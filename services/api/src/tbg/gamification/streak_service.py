@@ -6,12 +6,13 @@ import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tbg.db.models import Notification, StreakCalendar, UserGamification
+from tbg.db.models import Notification, StreakCalendar, StreakCelebration, UserGamification
 from tbg.gamification.xp_service import get_or_create_gamification, grant_xp
+from tbg.social.notification_push import push_notification_to_user
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ async def update_streak_calendar(
         constraint="streak_calendar_user_id_week_iso_key",
         set_={
             "share_count": StreakCalendar.share_count + 1,
-            "best_diff": stmt.excluded.best_diff,  # Will take max in trigger engine
+            "best_diff": func.greatest(StreakCalendar.best_diff, stmt.excluded.best_diff),
             "is_active": True,
         },
     )
@@ -111,6 +112,9 @@ async def check_streaks(db: AsyncSession, redis: object, now: datetime | None = 
             # Check streak badges
             await _check_streak_badges(db, redis, gam.user_id, gam.current_streak)
 
+            # Check for milestone celebration
+            await _maybe_create_streak_celebration(db, redis, gam.user_id, gam.current_streak)
+
             # Grant streak XP (10 XP per week)
             await grant_xp(
                 db, redis, gam.user_id, 10, "streak",
@@ -142,6 +146,10 @@ async def check_streaks(db: AsyncSession, redis: object, now: datetime | None = 
             gam.streak_start_date = cal.week_start
             gam.last_active_week = last_week_iso
             gam.updated_at = now
+
+            # Celebrate first week
+            await _maybe_create_streak_celebration(db, redis, cal.user_id, 1)
+
             processed += 1
 
     await db.commit()
@@ -190,6 +198,15 @@ STREAK_BADGE_MAP = {
     52: "streak_52",
 }
 
+# --- Streak milestone celebrations ---
+STREAK_MILESTONE_MAP = {
+    1: "First Week",
+    4: "Month Strong",
+    12: "Quarter Master",
+    26: "Half Year Hero",
+    52: "Year of Mining",
+}
+
 
 async def _check_streak_badges(
     db: AsyncSession,
@@ -223,7 +240,12 @@ async def _emit_streak_broken(
         created_at=now,
     )
     db.add(notification)
+    await db.flush()
 
+    # Push formatted notification to user's WebSocket connections
+    await push_notification_to_user(redis, notification)
+
+    # Broadcast raw event for activity feeds
     if redis is not None:
         try:
             await redis.publish(  # type: ignore[union-attr]
@@ -235,7 +257,7 @@ async def _emit_streak_broken(
                 }),
             )
         except Exception:
-            logger.warning("Failed to publish streak_broken notification", exc_info=True)
+            logger.warning("Failed to publish streak_broken broadcast", exc_info=True)
 
 
 async def _emit_streak_warning(
@@ -253,7 +275,12 @@ async def _emit_streak_warning(
         created_at=now,
     )
     db.add(notification)
+    await db.flush()
 
+    # Push formatted notification to user's WebSocket connections
+    await push_notification_to_user(redis, notification)
+
+    # Broadcast raw event for activity feeds
     if redis is not None:
         try:
             await redis.publish(  # type: ignore[union-attr]
@@ -265,4 +292,86 @@ async def _emit_streak_warning(
                 }),
             )
         except Exception:
-            logger.warning("Failed to publish streak_warning notification", exc_info=True)
+            logger.warning("Failed to publish streak_warning broadcast", exc_info=True)
+
+
+async def _maybe_create_streak_celebration(
+    db: AsyncSession, redis: object, user_id: int, streak_weeks: int,
+) -> None:
+    """Create a streak celebration if the current streak is a milestone."""
+    milestone = STREAK_MILESTONE_MAP.get(streak_weeks)
+    if milestone is None:
+        return
+
+    # Idempotent: unique constraint on (user_id, streak_weeks)
+    try:
+        stmt = pg_insert(StreakCelebration).values(
+            user_id=user_id,
+            streak_weeks=streak_weeks,
+            milestone=milestone,
+        )
+        stmt = stmt.on_conflict_do_nothing(
+            constraint="uq_streak_celebrations_user_weeks",
+        )
+        await db.execute(stmt)
+    except Exception:
+        logger.warning("Failed to create streak celebration for user %d at %d weeks", user_id, streak_weeks, exc_info=True)
+        return
+
+    # Publish real-time event
+    if redis is not None:
+        try:
+            await redis.publish(  # type: ignore[union-attr]
+                "pubsub:streak_update",
+                json.dumps({
+                    "type": "streak_milestone",
+                    "user_id": user_id,
+                    "event": "streak_milestone",
+                    "streak_weeks": streak_weeks,
+                    "milestone": milestone,
+                }),
+            )
+        except Exception:
+            logger.warning("Failed to publish streak_milestone broadcast", exc_info=True)
+
+
+async def get_pending_streak_celebrations(db: AsyncSession, user_id: int) -> list[dict]:
+    """Return uncelebrated streak milestones (oldest first)."""
+    result = await db.execute(
+        select(StreakCelebration)
+        .where(
+            StreakCelebration.user_id == user_id,
+            StreakCelebration.celebrated.is_(False),
+        )
+        .order_by(StreakCelebration.created_at.asc())
+    )
+    return [
+        {
+            "celebration_id": row.id,
+            "streak_weeks": row.streak_weeks,
+            "milestone": row.milestone,
+            "created_at": row.created_at,
+        }
+        for row in result.scalars()
+    ]
+
+
+async def acknowledge_streak_celebration(
+    db: AsyncSession, user_id: int, celebration_id: int,
+) -> bool:
+    """Mark a streak celebration as seen. Returns True if updated."""
+    result = await db.execute(
+        select(StreakCelebration).where(
+            StreakCelebration.id == celebration_id,
+            StreakCelebration.user_id == user_id,
+            StreakCelebration.celebrated.is_(False),
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return False
+
+    row.celebrated = True
+    row.celebrated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return True

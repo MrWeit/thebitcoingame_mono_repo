@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tbg.db.models import BadgeDefinition, BadgeStats, Notification, UserBadge, UserGamification
 from tbg.gamification.xp_service import get_or_create_gamification, grant_xp
+from tbg.social.notification_push import push_notification_to_user
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +137,12 @@ async def _emit_badge_earned(
         created_at=now,
     )
     db.add(notification)
+    await db.flush()  # Assign notification.id for WS push
 
-    # Push via WebSocket (Redis pub/sub)
+    # Push formatted notification to user's WebSocket connections
+    await push_notification_to_user(redis, notification)
+
+    # Broadcast raw event for activity feeds / overlays
     if redis is not None:
         try:
             await redis.publish(  # type: ignore[union-attr]
@@ -151,4 +156,4 @@ async def _emit_badge_earned(
                 }),
             )
         except Exception:
-            logger.warning("Failed to publish badge_earned notification", exc_info=True)
+            logger.warning("Failed to publish badge_earned broadcast", exc_info=True)

@@ -11,10 +11,10 @@ from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as aioredis
 import structlog
-from sqlalchemy import and_, delete, desc, or_, select
+from sqlalchemy import and_, delete, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tbg.db.models import ActivityFeed, UpcomingEvent
+from tbg.db.models import ActivityFeed, Share, UpcomingEvent
 
 logger = structlog.get_logger()
 
@@ -45,7 +45,7 @@ async def get_dashboard_stats(
 
     mining = await get_mining_summary(redis, session, btc_address, user_id)
 
-    # Gamification state (may not exist yet — Phase 4)
+    # Gamification state from denormalized table
     gamification = {
         "level": 1,
         "level_title": "Nocoiner",
@@ -55,27 +55,49 @@ async def get_dashboard_stats(
         "badges_earned": 0,
     }
     try:
-        from tbg.gamification.service import get_gamification_state  # type: ignore[import-not-found]
-        gamification = await get_gamification_state(session, user_id)
-    except (ImportError, Exception):
-        pass
+        from tbg.gamification.xp_service import get_or_create_gamification
+        from tbg.gamification.level_thresholds import compute_level
+
+        gam = await get_or_create_gamification(session, user_id)
+        level_info = compute_level(gam.total_xp)
+        gamification = {
+            "level": level_info["level"],
+            "level_title": level_info["title"],
+            "xp": gam.total_xp,
+            "xp_to_next": level_info["xp_for_level"],
+            "streak": gam.current_streak,
+            "badges_earned": gam.badges_earned,
+        }
+    except Exception:
+        logger.warning("gamification_state_fallback", user_id=user_id, exc_info=True)
 
     # Network info from Redis
     network_diff = float(await redis.get("network:difficulty") or 0)
     network_height = int(await redis.get("network:height") or 0)
 
+    # Weekly best difficulty from shares (ISO week = Monday-Sunday)
+    now = datetime.now(timezone.utc)
+    monday = now - timedelta(days=now.weekday())
+    week_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_best_result = await session.execute(
+        select(func.max(Share.share_diff))
+        .where(Share.btc_address == btc_address)
+        .where(Share.time >= week_start)
+    )
+    best_diff_week = float(week_best_result.scalar() or 0)
+
     stats = {
-        "hashrate": mining.hashrate_1h,
+        "hashrate": mining.hashrate_1m or mining.hashrate_5m or mining.hashrate_1h or mining.hashrate_24h,
         "hashrate_change": 0,  # computed from snapshots in Phase 4
         "shares_today": mining.shares_today,
         "shares_change": 0,
         "workers_online": mining.workers_online,
         "workers_total": mining.workers_total,
         "streak": gamification.get("streak", 0),
-        "best_diff_week": mining.best_diff_today,
+        "best_diff_week": best_diff_week,
         "network_diff": network_diff,
         "best_diff_ratio": (
-            mining.best_diff_today / network_diff
+            best_diff_week / network_diff
             if network_diff > 0 else 0
         ),
         "level": gamification.get("level", 1),
@@ -176,9 +198,27 @@ async def get_recent_badges(
     Graceful fallback — gamification tables may not exist until Phase 4.
     """
     try:
-        from tbg.gamification.service import get_recent_badges as _get_badges  # type: ignore[import-not-found]
-        return await _get_badges(session, user_id, limit)
-    except (ImportError, Exception):
+        from tbg.db.models import UserBadge, BadgeDefinition
+        from sqlalchemy import desc
+
+        result = await session.execute(
+            select(UserBadge, BadgeDefinition)
+            .join(BadgeDefinition, UserBadge.badge_id == BadgeDefinition.id)
+            .where(UserBadge.user_id == user_id)
+            .order_by(desc(UserBadge.earned_at))
+            .limit(limit)
+        )
+        rows = result.all()
+        return [
+            {
+                "slug": badge_def.slug,
+                "name": badge_def.name,
+                "rarity": badge_def.rarity,
+                "earned_at": user_badge.earned_at.isoformat() if user_badge.earned_at else "",
+            }
+            for user_badge, badge_def in rows
+        ]
+    except Exception:
         return []
 
 

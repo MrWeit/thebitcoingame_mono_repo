@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tbg.db.models import Notification, UserGamification, XPLedger
 from tbg.gamification.level_thresholds import compute_level
+from tbg.social.notification_push import push_notification_to_user
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,21 @@ async def _emit_level_up(
     )
     db.add(notification)
 
-    # Push via WebSocket (Redis pub/sub)
+    # Persist celebration so offline users see the animation on next login
+    from tbg.db.models import LevelCelebration
+    db.add(LevelCelebration(
+        user_id=user_id,
+        old_level=old_level,
+        new_level=new_level,
+        new_title=title,
+    ))
+
+    await db.flush()  # Assign notification.id for WS push
+
+    # Push formatted notification to user's WebSocket connections
+    await push_notification_to_user(redis, notification)
+
+    # Broadcast raw event for activity feeds / overlays
     if redis is not None:
         try:
             await redis.publish(  # type: ignore[union-attr]
@@ -126,4 +141,63 @@ async def _emit_level_up(
                 }),
             )
         except Exception:
-            logger.warning("Failed to publish level_up notification", exc_info=True)
+            logger.warning("Failed to publish level_up broadcast", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Level Celebration CRUD
+# ---------------------------------------------------------------------------
+
+
+async def get_pending_level_celebrations(
+    db: AsyncSession,
+    user_id: int,
+) -> list[dict]:
+    """Return level-up celebrations the user hasn't seen yet."""
+    from tbg.db.models import LevelCelebration
+
+    result = await db.execute(
+        select(LevelCelebration)
+        .where(
+            LevelCelebration.user_id == user_id,
+            LevelCelebration.celebrated == False,  # noqa: E712
+        )
+        .order_by(LevelCelebration.created_at.asc())
+    )
+    rows = result.scalars().all()
+
+    return [
+        {
+            "celebration_id": row.id,
+            "old_level": row.old_level,
+            "new_level": row.new_level,
+            "new_title": row.new_title,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+async def acknowledge_level_celebration(
+    db: AsyncSession,
+    user_id: int,
+    celebration_id: int,
+) -> bool:
+    """Mark a level celebration as seen. Returns True if updated."""
+    from tbg.db.models import LevelCelebration
+
+    result = await db.execute(
+        select(LevelCelebration).where(
+            LevelCelebration.id == celebration_id,
+            LevelCelebration.user_id == user_id,
+            LevelCelebration.celebrated == False,  # noqa: E712
+        )
+    )
+    cel = result.scalar_one_or_none()
+    if cel is None:
+        return False
+
+    cel.celebrated = True
+    cel.celebrated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return True

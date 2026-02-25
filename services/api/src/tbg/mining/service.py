@@ -54,6 +54,28 @@ from tbg.mining.schemas import (
 # ---------------------------------------------------------------------------
 
 
+def _parse_hashrate(value: str | int | float) -> float:
+    """Parse hashrate values that may have SI suffixes (e.g. '19.1M', '3.5K')."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return 0.0
+    s = str(value).strip()
+    if not s:
+        return 0.0
+    suffix = s[-1].upper()
+    multipliers = {"K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15}
+    if suffix in multipliers:
+        try:
+            return float(s[:-1]) * multipliers[suffix]
+        except ValueError:
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 async def get_workers(redis_client: aioredis.Redis, btc_address: str) -> WorkerListResponse:
     """Get all workers for a user from Redis hashes."""
     # Get worker names from the user's worker index set
@@ -65,15 +87,22 @@ async def get_workers(redis_client: aioredis.Redis, btc_address: str) -> WorkerL
         data: dict[str, str] = await redis_client.hgetall(key)  # type: ignore[assignment]
         if not data:
             continue
+        valid = int(data.get("valid_shares", 0))
+        invalid = int(data.get("invalid_shares", 0))
+        total_shares = valid + invalid
         workers.append(
             WorkerItem(
                 name=name,
                 status="online" if data.get("is_online") == "1" else "offline",
-                hashrate_1m=float(data.get("hashrate_1m", 0)),
-                hashrate_5m=float(data.get("hashrate_5m", 0)),
-                hashrate_1h=float(data.get("hashrate_1h", 0)),
-                hashrate_24h=float(data.get("hashrate_24h", 0)),
+                hashrate_1m=_parse_hashrate(data.get("hashrate_1m", 0)),
+                hashrate_5m=_parse_hashrate(data.get("hashrate_5m", 0)),
+                hashrate_1h=_parse_hashrate(data.get("hashrate_1h", 0)),
+                hashrate_24h=_parse_hashrate(data.get("hashrate_24h", 0)),
                 current_diff=float(data.get("current_diff", 0)),
+                best_diff=float(data.get("best_diff", 0)),
+                valid_shares=valid,
+                invalid_shares=invalid,
+                accept_rate=round(valid / total_shares * 100, 2) if total_shares > 0 else 100.0,
                 last_share=data.get("last_share"),
                 connected_at=data.get("connected_at"),
                 ip_address=data.get("ip"),
@@ -98,14 +127,21 @@ async def get_worker_detail(
     if not data:
         return None
 
+    valid = int(data.get("valid_shares", 0))
+    invalid = int(data.get("invalid_shares", 0))
+    total_shares = valid + invalid
     worker = WorkerItem(
         name=worker_name,
         status="online" if data.get("is_online") == "1" else "offline",
-        hashrate_1m=float(data.get("hashrate_1m", 0)),
-        hashrate_5m=float(data.get("hashrate_5m", 0)),
-        hashrate_1h=float(data.get("hashrate_1h", 0)),
-        hashrate_24h=float(data.get("hashrate_24h", 0)),
+        hashrate_1m=_parse_hashrate(data.get("hashrate_1m", 0)),
+        hashrate_5m=_parse_hashrate(data.get("hashrate_5m", 0)),
+        hashrate_1h=_parse_hashrate(data.get("hashrate_1h", 0)),
+        hashrate_24h=_parse_hashrate(data.get("hashrate_24h", 0)),
         current_diff=float(data.get("current_diff", 0)),
+        best_diff=float(data.get("best_diff", 0)),
+        valid_shares=valid,
+        invalid_shares=invalid,
+        accept_rate=round(valid / total_shares * 100, 2) if total_shares > 0 else 100.0,
         last_share=data.get("last_share"),
         connected_at=data.get("connected_at"),
         ip_address=data.get("ip"),
@@ -225,22 +261,40 @@ async def get_hashrate_summary(
     user_key = f"user_hashrate:{btc_address}"
     data: dict[str, str] = await redis_client.hgetall(user_key)  # type: ignore[assignment]
 
+    # Count online workers (needed by all paths)
+    worker_names: set[str] = await redis_client.smembers(f"workers:{btc_address}")  # type: ignore[assignment]
+    online = 0
+    for name in worker_names:
+        w_data = await redis_client.hgetall(f"worker:{btc_address}:{name}")
+        if w_data.get("is_online") == "1":
+            online += 1
+
     if data:
-        worker_names: set[str] = await redis_client.smembers(f"workers:{btc_address}")  # type: ignore[assignment]
-        online = 0
-        for name in worker_names:
-            w_data = await redis_client.hgetall(f"worker:{btc_address}:{name}")
-            if w_data.get("is_online") == "1":
-                online += 1
         return HashrateResponse(
-            hashrate_1m=float(data.get("hashrate_1m", 0)),
-            hashrate_5m=float(data.get("hashrate_5m", 0)),
-            hashrate_1h=float(data.get("hashrate_1h", 0)),
-            hashrate_24h=float(data.get("hashrate_24h", 0)),
+            hashrate_1m=_parse_hashrate(data.get("hashrate_1m", 0)),
+            hashrate_5m=_parse_hashrate(data.get("hashrate_5m", 0)),
+            hashrate_1h=_parse_hashrate(data.get("hashrate_1h", 0)),
+            hashrate_24h=_parse_hashrate(data.get("hashrate_24h", 0)),
             workers_online=online,
         )
 
-    # Fallback: compute from shares
+    # Fallback: aggregate directly from per-worker Redis hashes
+    if worker_names:
+        agg = {"hashrate_1m": 0.0, "hashrate_5m": 0.0, "hashrate_1h": 0.0, "hashrate_24h": 0.0}
+        for name in worker_names:
+            w_data = await redis_client.hgetall(f"worker:{btc_address}:{name}")
+            for field in agg:
+                agg[field] += _parse_hashrate(w_data.get(field, "0"))
+        if any(v > 0 for v in agg.values()):
+            return HashrateResponse(
+                hashrate_1m=agg["hashrate_1m"],
+                hashrate_5m=agg["hashrate_5m"],
+                hashrate_1h=agg["hashrate_1h"],
+                hashrate_24h=agg["hashrate_24h"],
+                workers_online=online,
+            )
+
+    # Last fallback: compute from shares in DB
     h_1m = await compute_hashrate(db, btc_address, 60)
     h_5m = await compute_hashrate(db, btc_address, 300)
     h_1h = await compute_hashrate(db, btc_address, 3600)
@@ -251,7 +305,7 @@ async def get_hashrate_summary(
         hashrate_5m=h_5m,
         hashrate_1h=h_1h,
         hashrate_24h=h_24h,
-        workers_online=0,
+        workers_online=online,
     )
 
 
@@ -298,11 +352,15 @@ async def get_worker_hashrate_chart(
     worker_name: str,
     window: str = "24h",
 ) -> HashrateChartResponse:
-    """Get hashrate time series for a specific worker."""
+    """Get hashrate time series for a specific worker.
+
+    Falls back to user-aggregate snapshots if no per-worker data exists.
+    """
     window_map = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
     seconds = window_map.get(window, 86400)
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
 
+    # Try per-worker snapshots first
     result = await db.execute(
         select(HashrateSnapshot.time, HashrateSnapshot.hashrate_5m)
         .where(HashrateSnapshot.user_id == user_id)
@@ -311,6 +369,17 @@ async def get_worker_hashrate_chart(
         .order_by(HashrateSnapshot.time.asc())
     )
     rows = result.all()
+
+    # Fall back to user-aggregate if no per-worker data
+    if not rows:
+        result = await db.execute(
+            select(HashrateSnapshot.time, HashrateSnapshot.hashrate_5m)
+            .where(HashrateSnapshot.user_id == user_id)
+            .where(HashrateSnapshot.worker_name.is_(None))
+            .where(HashrateSnapshot.time >= cutoff)
+            .order_by(HashrateSnapshot.time.asc())
+        )
+        rows = result.all()
 
     points = [HashratePoint(time=r.time, hashrate=r.hashrate_5m or 0.0) for r in rows]
     hashrates = [p.hashrate for p in points if p.hashrate > 0]
@@ -644,6 +713,8 @@ async def get_mining_summary(
                 last_share = w.last_share
 
     return MiningSummaryResponse(
+        hashrate_1m=hashrate.hashrate_1m,
+        hashrate_5m=hashrate.hashrate_5m,
         hashrate_1h=hashrate.hashrate_1h,
         hashrate_24h=hashrate.hashrate_24h,
         workers_online=workers_resp.online_count,
@@ -778,3 +849,90 @@ async def get_network_blocks(
     ]
 
     return NetworkBlocksResponse(blocks=blocks)
+
+
+# ---------------------------------------------------------------------------
+# Block Celebrations
+# ---------------------------------------------------------------------------
+
+
+async def get_pending_celebrations(
+    db: AsyncSession,
+    user_id: int,
+) -> list[dict]:
+    """Return uncelebrated block-found events for a user."""
+    from tbg.db.models import BlockCelebration
+
+    result = await db.execute(
+        select(BlockCelebration, Block)
+        .join(Block, BlockCelebration.block_id == Block.id)
+        .where(
+            BlockCelebration.user_id == user_id,
+            BlockCelebration.celebrated == False,  # noqa: E712
+        )
+        .order_by(Block.found_at.asc())
+    )
+    rows = result.all()
+
+    return [
+        {
+            "celebration_id": cel.id,
+            "block_id": blk.id,
+            "block_height": blk.block_height,
+            "block_hash": blk.block_hash,
+            "reward_btc": float(blk.reward_btc) if blk.reward_btc else 0.0,
+            "found_at": blk.found_at.isoformat(),
+        }
+        for cel, blk in rows
+    ]
+
+
+async def acknowledge_celebration(
+    db: AsyncSession,
+    user_id: int,
+    celebration_id: int,
+) -> bool:
+    """Mark a celebration as seen. Returns True if updated."""
+    from tbg.db.models import BlockCelebration
+
+    result = await db.execute(
+        select(BlockCelebration).where(
+            BlockCelebration.id == celebration_id,
+            BlockCelebration.user_id == user_id,
+            BlockCelebration.celebrated == False,  # noqa: E712
+        )
+    )
+    cel = result.scalar_one_or_none()
+    if cel is None:
+        return False
+
+    cel.celebrated = True
+    cel.celebrated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return True
+
+
+async def create_block_celebration(
+    db: AsyncSession,
+    block_id: int,
+    user_id: int,
+) -> None:
+    """Create a pending celebration record for a found block."""
+    from tbg.db.models import BlockCelebration
+
+    # Avoid duplicates
+    result = await db.execute(
+        select(BlockCelebration.id).where(
+            BlockCelebration.block_id == block_id,
+            BlockCelebration.user_id == user_id,
+        )
+    )
+    if result.scalar_one_or_none() is not None:
+        return
+
+    db.add(BlockCelebration(
+        block_id=block_id,
+        user_id=user_id,
+        celebrated=False,
+    ))
+    await db.commit()

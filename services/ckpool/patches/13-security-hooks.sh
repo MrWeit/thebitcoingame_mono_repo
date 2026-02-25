@@ -218,26 +218,23 @@ else
 fi
 
 # ─── Add initialization calls to ckpool.c ────────────────────────────
-# Earlier patches only add config parsing to ckpool.c, not code in main().
-# We find main()'s opening brace and insert early in the function body.
+# IMPORTANT: Must insert AFTER launch_logger() and config parsing, otherwise
+# LOGNOTICE/LOGWARNING calls in tbg_rate_limit_init will segfault because
+# ckpool's logging subsystem isn't ready yet.
+# We anchor on the first prepare_child() call, which is after all setup.
 echo "  Adding Phase 5 initialization to ckpool.c..."
 if ! grep -q "tbg_rate_limit_init.*TBG_P5" "${MAIN}"; then
-    MAIN_LINE=$(getline 'int main(int argc' "${MAIN}")
-    if [ -n "${MAIN_LINE}" ]; then
-        BRACE=$(awk -v start="${MAIN_LINE}" 'NR > start && /^{/ { print NR; exit }' "${MAIN}")
-        if [ -n "${BRACE}" ]; then
-            sedi "${BRACE}a\\
+    LINE=$(getline 'prepare_child.*generator.*"generator"' "${MAIN}")
+    if [ -n "${LINE}" ]; then
+        sedi "${LINE}i\\
 \\
 \t/* TBG_P5: Initialize security and performance modules */\\
 \ttbg_rate_limit_init(NULL); /* TBG_P5: Use default rate limits */\\
 \tLOGNOTICE(\"TBG Phase 5: Security modules initialized\"); /* TBG_P5 */" "${MAIN}"
-            echo "    Initialization hooks added to ckpool.c (after main brace at ${BRACE})"
-            apply_hook
-        else
-            echo "    WARNING: Could not find opening brace for main()"
-        fi
+        echo "    Initialization hooks added to ckpool.c (before prepare_child at ${LINE})"
+        apply_hook
     else
-        echo "    WARNING: main function not found in ckpool.c"
+        echo "    WARNING: prepare_child generator not found in ckpool.c"
     fi
 else
     echo "    Already patched"

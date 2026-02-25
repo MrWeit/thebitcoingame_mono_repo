@@ -23,6 +23,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
@@ -261,6 +262,68 @@ class Block(Base):
 
     user: Mapped[User | None] = relationship("User", back_populates="blocks", foreign_keys=[user_id])
     worker: Mapped[Worker | None] = relationship("Worker", back_populates="blocks")
+    celebrations: Mapped[list[BlockCelebration]] = relationship("BlockCelebration", back_populates="block")
+
+
+class BlockCelebration(Base):
+    """Tracks whether a user has seen the celebration for a found block."""
+
+    __tablename__ = "block_celebrations"
+    __table_args__ = (
+        UniqueConstraint("block_id", "user_id", name="uq_block_celebrations_block_user"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    block_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("blocks.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    celebrated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    celebrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    block: Mapped[Block] = relationship("Block", back_populates="celebrations")
+    user: Mapped[User] = relationship("User")
+
+
+class LevelCelebration(Base):
+    """Tracks whether a user has seen the celebration for a level-up."""
+
+    __tablename__ = "level_celebrations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "new_level", name="uq_level_celebrations_user_level"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    old_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    new_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    new_title: Mapped[str] = mapped_column(String(100), nullable=False)
+    celebrated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    celebrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship("User")
+
+
+class StreakCelebration(Base):
+    """Tracks whether a user has seen the celebration for a streak milestone."""
+
+    __tablename__ = "streak_celebrations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "streak_weeks", name="uq_streak_celebrations_user_weeks"),
+        {"extend_existing": True},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    streak_weeks: Mapped[int] = mapped_column(Integer, nullable=False)
+    milestone: Mapped[str] = mapped_column(String(100), nullable=False)
+    celebrated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    celebrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship("User")
 
 
 class WeeklyBestDiff(Base):

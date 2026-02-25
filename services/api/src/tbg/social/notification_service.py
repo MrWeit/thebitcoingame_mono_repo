@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tbg.db.models import Notification, UserSettings
+from tbg.social.notification_push import push_notification_to_user
 
 logger = logging.getLogger(__name__)
 
@@ -116,26 +117,8 @@ async def create_notification(
     db.add(notification)
     await db.flush()
 
-    # Push via WebSocket (Redis pub/sub)
-    if redis is not None:
-        ws_payload = {
-            "event": "notification",
-            "data": {
-                "id": str(notification.id),
-                "type": notification.type,
-                "subtype": notification.subtype,
-                "title": notification.title,
-                "description": notification.description,
-                "timestamp": notification.created_at.isoformat() if notification.created_at else None,
-                "read": False,
-                "actionUrl": notification.action_url,
-                "actionLabel": notification.action_label,
-            },
-        }
-        try:
-            await redis.publish(f"ws:user:{user_id}", json.dumps(ws_payload))
-        except Exception:
-            logger.warning("Failed to push notification via WebSocket", exc_info=True)
+    # Push formatted notification to user's WebSocket connections
+    await push_notification_to_user(redis, notification)
 
     return notification
 

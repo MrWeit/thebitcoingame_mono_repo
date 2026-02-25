@@ -31,6 +31,9 @@ class DBWriter:
         self._events_written = 0
         self._events_failed = 0
         self._flush_task: asyncio.Task[None] | None = None
+        # Share dedup: track (user, sdiff) seen within the last second
+        self._share_seen: dict[str, float] = {}  # "user:sdiff" -> timestamp
+        self._share_dedup_window = 2.0  # seconds
 
     async def connect(self) -> None:
         """Create connection pool to TimescaleDB."""
@@ -72,18 +75,34 @@ class DBWriter:
 
         # Also accumulate share-specific batch for the shares hypertable
         if event.event == EventType.SHARE_SUBMITTED and event.data:
-            self._share_batch.append(
-                (
-                    ts,
-                    event.data.get("user", "unknown"),
-                    event.data.get("worker", "unknown"),
-                    event.data.get("diff", 0.0),
-                    event.data.get("sdiff", 0.0),
-                    event.data.get("accepted", True),
-                    event.data.get("ip", ""),
-                    event.source,
+            user = event.data.get("user", "unknown")
+            sdiff = event.data.get("sdiff", 0.0)
+            dedup_key = f"{user}:{sdiff}"
+            now_ts = event.ts
+            # Skip duplicate share events (same user+sdiff within 2 seconds)
+            prev_ts = self._share_seen.get(dedup_key)
+            if prev_ts is not None and abs(now_ts - prev_ts) < self._share_dedup_window:
+                logger.debug("Skipping duplicate share event: %s", dedup_key)
+            else:
+                self._share_seen[dedup_key] = now_ts
+                # Prune old entries every 100 entries
+                if len(self._share_seen) > 500:
+                    cutoff = now_ts - self._share_dedup_window * 2
+                    self._share_seen = {
+                        k: v for k, v in self._share_seen.items() if v > cutoff
+                    }
+                self._share_batch.append(
+                    (
+                        ts,
+                        user,
+                        event.data.get("worker", "unknown"),
+                        event.data.get("diff", 0.0),
+                        sdiff,
+                        event.data.get("accepted", True),
+                        event.data.get("ip", ""),
+                        event.source,
+                    )
                 )
-            )
 
         if len(self._batch) >= self._config.batch_max_size:
             await self._flush()

@@ -226,7 +226,10 @@ bool tbg_validate_btc_address(const char *address)
 		return false;
 
 	/* Determine address type by prefix */
-	if (address[0] == '1' || address[0] == '3')
+	/* Mainnet P2PKH (1), Mainnet P2SH (3) */
+	/* Testnet/Signet P2PKH (m, n), Testnet/Signet P2SH (2) */
+	if (address[0] == '1' || address[0] == '3' ||
+	    address[0] == 'm' || address[0] == 'n' || address[0] == '2')
 		return validate_base58_address(address);
 
 	if (strncasecmp(address, "bc1", 3) == 0 ||

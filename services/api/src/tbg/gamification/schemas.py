@@ -86,6 +86,7 @@ class StreakResponse(BaseModel):
     streak_start_date: date | None = None
     last_active_week: str | None = None
     is_active_this_week: bool = False
+    effective_streak: int = 0  # Accounts for gap between weekly evaluations
 
 
 class StreakWeekEntry(BaseModel):
@@ -122,3 +123,32 @@ class LevelEntry(BaseModel):
 
 class AllLevelsResponse(BaseModel):
     levels: list[LevelEntry]
+
+
+# --- Level Celebrations ---
+
+
+class PendingLevelCelebrationItem(BaseModel):
+    celebration_id: int
+    old_level: int
+    new_level: int
+    new_title: str
+    created_at: datetime
+
+
+class PendingLevelCelebrationsResponse(BaseModel):
+    celebrations: list[PendingLevelCelebrationItem]
+
+
+# --- Streak Celebrations ---
+
+
+class PendingStreakCelebrationItem(BaseModel):
+    celebration_id: int
+    streak_weeks: int
+    milestone: str
+    created_at: datetime
+
+
+class PendingStreakCelebrationsResponse(BaseModel):
+    celebrations: list[PendingStreakCelebrationItem]

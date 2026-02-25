@@ -22,6 +22,10 @@ class WorkerItem(BaseModel):
     hashrate_1h: float = 0.0
     hashrate_24h: float = 0.0
     current_diff: float = 0.0
+    best_diff: float = 0.0
+    valid_shares: int = 0
+    invalid_shares: int = 0
+    accept_rate: float = 100.0
     last_share: str | None = None
     connected_at: str | None = None
     ip_address: str | None = None
@@ -210,6 +214,8 @@ class BlockDetailResponse(BaseModel):
 class MiningSummaryResponse(BaseModel):
     """Dashboard mining summary."""
 
+    hashrate_1m: float = 0.0
+    hashrate_5m: float = 0.0
     hashrate_1h: float = 0.0
     hashrate_24h: float = 0.0
     workers_online: int = 0
@@ -279,6 +285,28 @@ class NetworkBlocksResponse(BaseModel):
     """Recent network blocks response."""
 
     blocks: list[NetworkBlockItem]
+
+
+# ---------------------------------------------------------------------------
+# Block Celebrations
+# ---------------------------------------------------------------------------
+
+
+class CelebrationItem(BaseModel):
+    """Pending block celebration for delivery to the frontend."""
+
+    celebration_id: int
+    block_id: int
+    block_height: int
+    block_hash: str
+    reward_btc: float = 0.0
+    found_at: datetime
+
+
+class PendingCelebrationsResponse(BaseModel):
+    """Response for GET /mining/celebrations/pending."""
+
+    celebrations: list[CelebrationItem]
 
 
 # ---------------------------------------------------------------------------

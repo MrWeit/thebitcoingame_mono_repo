@@ -29,6 +29,10 @@ from tbg.gamification.schemas import (
     EarnedBadgeResponse,
     GamificationSummaryResponse,
     LevelEntry,
+    PendingLevelCelebrationItem,
+    PendingLevelCelebrationsResponse,
+    PendingStreakCelebrationItem,
+    PendingStreakCelebrationsResponse,
     StreakCalendarResponse,
     StreakResponse,
     StreakWeekEntry,
@@ -253,12 +257,22 @@ async def get_my_streak(
     )
     is_active = active_result.scalar_one_or_none() is not None
 
+    # Effective streak: if the user is active this week but check_streaks()
+    # hasn't run yet (e.g. current_streak=0 but active this week), show 1.
+    # If they already have a streak and are active, show current + 1 (the
+    # upcoming week hasn't been counted yet but they've already satisfied it).
+    if is_active:
+        effective = max(gam.current_streak, 1)
+    else:
+        effective = gam.current_streak
+
     return StreakResponse(
         current_streak=gam.current_streak,
         longest_streak=gam.longest_streak,
         streak_start_date=gam.streak_start_date,
         last_active_week=gam.last_active_week,
         is_active_this_week=is_active,
+        effective_streak=effective,
     )
 
 
@@ -330,6 +344,7 @@ async def get_gamification_summary(
             streak_start_date=gam.streak_start_date,
             last_active_week=gam.last_active_week,
             is_active_this_week=is_active,
+            effective_streak=max(gam.current_streak, 1) if is_active else gam.current_streak,
         ),
         badges={
             "earned": gam.badges_earned,
@@ -341,3 +356,65 @@ async def get_gamification_summary(
             "blocks_found": gam.blocks_found,
         },
     )
+
+
+# ── Level Celebrations ──
+
+
+@router.get("/users/me/level-ups/pending", response_model=PendingLevelCelebrationsResponse)
+async def get_pending_level_ups(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Return level-up celebrations the user hasn't seen yet."""
+    from tbg.gamification.xp_service import get_pending_level_celebrations
+
+    items = await get_pending_level_celebrations(db, user.id)
+    return PendingLevelCelebrationsResponse(
+        celebrations=[PendingLevelCelebrationItem(**item) for item in items],
+    )
+
+
+@router.post("/users/me/level-ups/{celebration_id}/ack", status_code=204)
+async def acknowledge_level_up(
+    celebration_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Mark a level-up celebration as seen."""
+    from tbg.gamification.xp_service import acknowledge_level_celebration
+
+    updated = await acknowledge_level_celebration(db, user.id, celebration_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Celebration not found or already acknowledged")
+
+
+# ── Streak Celebrations ──
+
+
+@router.get("/users/me/streak-milestones/pending", response_model=PendingStreakCelebrationsResponse)
+async def get_pending_streak_milestones(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Return streak milestone celebrations the user hasn't seen yet."""
+    from tbg.gamification.streak_service import get_pending_streak_celebrations
+
+    items = await get_pending_streak_celebrations(db, user.id)
+    return PendingStreakCelebrationsResponse(
+        celebrations=[PendingStreakCelebrationItem(**item) for item in items],
+    )
+
+
+@router.post("/users/me/streak-milestones/{celebration_id}/ack", status_code=204)
+async def acknowledge_streak_milestone(
+    celebration_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Mark a streak milestone celebration as seen."""
+    from tbg.gamification.streak_service import acknowledge_streak_celebration
+
+    updated = await acknowledge_streak_celebration(db, user.id, celebration_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Celebration not found or already acknowledged")

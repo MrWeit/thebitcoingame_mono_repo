@@ -261,3 +261,33 @@ async def get_network_blocks(
     """Get recent network blocks."""
     redis_client = _redis()
     return await service.get_network_blocks(redis_client, db, limit)
+
+
+# ---------------------------------------------------------------------------
+# 18. GET /mining/celebrations/pending — Uncelebrated block events
+# ---------------------------------------------------------------------------
+@router.get("/celebrations/pending", response_model=schemas.PendingCelebrationsResponse)
+async def get_pending_celebrations(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> schemas.PendingCelebrationsResponse:
+    """Return block celebrations the user hasn't seen yet."""
+    items = await service.get_pending_celebrations(db, user.id)
+    return schemas.PendingCelebrationsResponse(
+        celebrations=[schemas.CelebrationItem(**item) for item in items],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 19. POST /mining/celebrations/{celebration_id}/ack — Mark as seen
+# ---------------------------------------------------------------------------
+@router.post("/celebrations/{celebration_id}/ack", status_code=204)
+async def acknowledge_celebration(
+    celebration_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> None:
+    """Mark a celebration as seen so it won't be delivered again."""
+    updated = await service.acknowledge_celebration(db, user.id, celebration_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Celebration not found or already acknowledged")

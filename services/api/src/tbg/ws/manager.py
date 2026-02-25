@@ -15,7 +15,7 @@ import structlog
 
 logger = structlog.get_logger()
 
-VALID_CHANNELS = {"mining", "dashboard", "gamification", "competition"}
+VALID_CHANNELS = {"mining", "dashboard", "gamification", "competition", "notifications"}
 
 
 @dataclass
@@ -150,6 +150,37 @@ class ConnectionManager:
                     sent += 1
                 except Exception:
                     await self.disconnect(conn_id)
+
+        return sent
+
+    async def send_to_user_direct(self, user_id: int, message: dict) -> int:
+        """Send a message to ALL connections of a specific user (no channel filter).
+
+        Used for personal notifications that should always be delivered
+        regardless of channel subscriptions.
+        """
+        conn_ids = list(self._user_connections.get(user_id, set()))
+        if not conn_ids:
+            return 0
+
+        payload = json.dumps({"channel": "notifications", "data": message})
+        sent = 0
+        failed: list[str] = []
+
+        for conn_id in conn_ids:
+            client = self._connections.get(conn_id)
+            if client is None:
+                failed.append(conn_id)
+                continue
+            try:
+                await client.websocket.send_text(payload)
+                client.messages_sent += 1
+                sent += 1
+            except Exception:
+                failed.append(conn_id)
+
+        for conn_id in failed:
+            await self.disconnect(conn_id)
 
         return sent
 
